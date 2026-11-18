@@ -120,14 +120,11 @@ pub(super) fn highlight(hl: &SyntaxHighlighter, content: &str) -> HighlightedLin
             Event::Start(Tag::CodeBlock(kind)) => {
                 // The ``` fence itself stays at the theme default, matching the
                 // grammar. The block's contents are painted from `Event::Text`.
-                let token = match &kind {
-                    CodeBlockKind::Fenced(lang) => lang.split_whitespace().next().unwrap_or(""),
-                    CodeBlockKind::Indented => "",
-                };
-                code_block = (!token.is_empty())
-                    .then(|| hl.syntax_set.find_syntax_by_token(token))
-                    .flatten()
-                    .map(|syntax| syntect::easy::HighlightLines::new(syntax, &hl.theme));
+                code_block = match kind {
+                    CodeBlockKind::Fenced(info) => hl.fenced_syntax(&info),
+                    CodeBlockKind::Indented => None,
+                }
+                .map(|syntax| syntect::easy::HighlightLines::new(syntax, &hl.theme));
             }
             Event::End(TagEnd::CodeBlock) => code_block = None,
             Event::Text(text) => {

@@ -211,14 +211,18 @@ impl App {
     }
 
     pub fn scroll_view_down(&mut self, lines: usize) {
-        let max_scroll = self.max_scroll_offset();
-        self.diff_state.scroll_offset = (self.diff_state.scroll_offset + lines).min(max_scroll);
+        // Viewport motions only run outside the inline comment editor, so the
+        // existing annotation stream already has the exact document height.
+        let total = self.line_annotations.len();
+        self.diff_state.scroll_offset =
+            (self.diff_state.scroll_offset + lines).min(total.saturating_sub(1));
         let scroll_margin = self.diff_state.effective_scroll_margin(self.scroll_offset);
-        let min_cursor =
-            (self.diff_state.scroll_offset + scroll_margin).min(self.max_cursor_line());
+        let trailing_spacing = matches!(self.line_annotations.last(), Some(AnnotatedLine::Spacing));
+        let max_cursor = total.saturating_sub(1 + usize::from(trailing_spacing));
+        let min_cursor = (self.diff_state.scroll_offset + scroll_margin).min(max_cursor);
         if self.diff_state.cursor_line < min_cursor {
             self.diff_state.cursor_line = min_cursor;
-            self.update_current_file_from_cursor();
+            self.sync_scrolled_file();
         }
     }
 
@@ -232,6 +236,29 @@ impl App {
         let bottom = self.diff_state.scroll_offset + visible_lines.saturating_sub(1);
         if self.diff_state.cursor_line > bottom {
             self.diff_state.cursor_line = bottom;
+            self.sync_scrolled_file();
+        }
+    }
+
+    fn sync_scrolled_file(&mut self) {
+        if self.is_single_file_view {
+            return;
+        }
+        let annotation = self.line_annotations.get(self.diff_state.cursor_line);
+        let file_idx = match annotation {
+            Some(
+                AnnotatedLine::Expander { gap_id, .. }
+                | AnnotatedLine::HiddenLines { gap_id, .. }
+                | AnnotatedLine::ExpandedContext { gap_id, .. },
+            ) => Some(gap_id.file_idx),
+            Some(annotation) => annotation_file_idx(annotation),
+            None => None,
+        };
+        if let Some(file_idx) = file_idx {
+            self.diff_state.current_file_idx = file_idx;
+            self.file_list_state.select(file_idx);
+        } else {
+            // Spacing and remote thread rows do not carry a file index.
             self.update_current_file_from_cursor();
         }
     }
@@ -339,6 +366,7 @@ impl App {
     }
 
     pub fn set_diff_wrap(&mut self, enabled: bool) {
+        self.keep_guide_stop_in_view();
         self.diff_state.wrap_lines = enabled;
         if enabled {
             self.diff_state.scroll_x = 0;
@@ -519,6 +547,7 @@ impl App {
         match result {
             FindSourceLineResult::Exact(idx) | FindSourceLineResult::Nearest(idx) => {
                 self.diff_state.cursor_line = idx;
+                self.cursor_side = side;
                 self.ensure_cursor_visible();
                 self.center_cursor();
                 self.update_current_file_from_cursor();
@@ -1546,7 +1575,7 @@ impl App {
     /// Uses viewport_width to account for pre-wrapped visual segments so the
     /// annotation count stays in sync with what format_comment_lines renders.
     pub(crate) fn comment_display_lines(comment: &Comment, viewport_width: usize) -> usize {
-        crate::ui::comment_panel::comment_box_rows(&comment.content, viewport_width)
+        crate::ui::comment_panel::comment_box_rows(&comment.display_content(), viewport_width)
     }
 
     /// Update viewport_width and trigger annotation rebuild if it changed.
@@ -1573,6 +1602,14 @@ impl App {
                 new_lineno,
                 ..
             }) => Self::line_for_side(self.effective_cursor_side(), *old_lineno, *new_lineno),
+            Some(AnnotatedLine::ExpandedContext { gap_id, line_idx }) => {
+                let line = self.get_expanded_line(gap_id, *line_idx)?;
+                Self::line_for_side(
+                    self.effective_cursor_side(),
+                    line.old_lineno,
+                    line.new_lineno,
+                )
+            }
             _ => None,
         }
     }
@@ -1612,6 +1649,7 @@ impl App {
 impl App {
     /// Reset scroll/cursor state while keeping the user's wrap preference.
     pub(super) fn reset_diff_state(&mut self) {
+        self.invalidate_companion_diff();
         let wrap = self.diff_state.wrap_lines;
         self.diff_state = DiffState::default();
         self.diff_state.wrap_lines = wrap;

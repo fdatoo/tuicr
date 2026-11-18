@@ -612,6 +612,51 @@ fn should_observe_externally_reloaded_session() {
 }
 
 #[test]
+fn comment_navigator_cache_tracks_add_delete_and_external_reload() {
+    let _reviews = TestReviewsDir::new();
+    let file = make_diff_file("a.rs", FileStatus::Modified, 1);
+    let mut app = build_app_with_scripted_vcs(vec![file], ScriptedVcs::new());
+    assert!(app.comment_navigator_items().is_empty());
+
+    app.comment_is_review_level = true;
+    app.comment_buffer = "local note".into();
+    app.save_comment();
+    let items = app.comment_navigator_items();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items.as_ptr(), app.comment_navigator_items().as_ptr());
+    assert_eq!(app.comment_navigator_max_width(|_| 5), 5);
+    assert_eq!(
+        app.comment_navigator_max_width(|_| panic!("width already cached")),
+        5
+    );
+
+    app.diff_state.cursor_line = items[0].target_annotation;
+    assert!(app.delete_comment_at_cursor());
+    assert!(app.comment_navigator_items().is_empty());
+    assert_eq!(
+        app.comment_navigator_max_width(|_| panic!("no items to measure")),
+        0
+    );
+
+    let path = app.save_current_session_merging_external().unwrap();
+    let mut external = crate::persistence::storage::load_session(&path).unwrap();
+    external.review_comments.push(Comment::new(
+        "external issue".into(),
+        CommentType::from_id("issue"),
+        None,
+    ));
+    crate::persistence::storage::save_session(&external).unwrap();
+    assert_eq!(app.reload_persisted_session_if_changed(true).unwrap(), 1);
+    let items = app.comment_navigator_items();
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0].kind,
+        CommentNavigatorKind::Local(CommentType::from_id("issue"))
+    );
+    assert_eq!(app.comment_navigator_max_width(|_| 11), 11);
+}
+
+#[test]
 fn should_persist_full_local_reload_invalidation() {
     let _reviews = TestReviewsDir::new();
     let kept_hunk = make_hunk(10, "kept");
@@ -967,6 +1012,17 @@ fn should_propagate_no_changes_when_backend_reports_no_changes() {
         matches!(result, Err(TuicrError::NoChanges)),
         "expected Err(NoChanges), got {result:?}"
     );
+}
+
+#[test]
+fn diff_view_reload_publishes_an_empty_diff_when_last_change_is_reverted() {
+    let initial = vec![make_diff_file("a.rs", FileStatus::Modified, 1)];
+    let vcs = ScriptedVcs::new();
+    vcs.push_working_tree_diff(Ok(Vec::new()));
+    let mut app = build_app_with_scripted_vcs(initial, vcs);
+
+    assert_eq!(app.reload_diff_view().unwrap(), (0, 0));
+    assert!(app.diff_files.is_empty());
 }
 
 /// Regression test: narrow the inline commit selector to a subset of commits,

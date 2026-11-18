@@ -37,7 +37,7 @@ const DEFAULT_GITHUB_HOST: &str = "github.com";
 /// `object(expression:)` field, so this bounds the query and response size.
 const BLOB_TEXTS_PER_QUERY: usize = 50;
 const PR_LIST_JSON_FIELDS: &str =
-    "number,title,author,headRefName,baseRefName,updatedAt,url,state,isDraft";
+    "number,title,author,headRefName,headRefOid,baseRefName,updatedAt,url,state,isDraft";
 const PR_INFO_JSON_FIELDS: &str = concat!(
     "number,title,url,state,isDraft,author,headRefName,baseRefName,",
     "headRefOid,baseRefOid,body,updatedAt,closed,mergedAt,",

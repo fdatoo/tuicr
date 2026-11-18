@@ -1,7 +1,7 @@
 //! CLI argument parsing, backed by `clap`.
 //!
 //! The struct [`Cli`] is the clap-derived parser; [`CliArgs`] is the simple
-//! POJO the rest of the binary consumes. Conversion lives in `From<Cli>`.
+//! arguments the rest of the binary consumes.
 
 use std::path::PathBuf;
 
@@ -30,6 +30,8 @@ pub struct CliArgs {
     pub all_files: bool,
     /// Source line (new side) to put the cursor on at startup.
     pub start_line: Option<u32>,
+    pub guide: Option<PathBuf>,
+    pub guide_command: Option<GuideCommand>,
     /// Direct PR target from `tuicr pr <target>`.
     pub pr_target: Option<String>,
     /// Override the GitHub repo used for PR operations.
@@ -115,6 +117,10 @@ struct TuiOptions {
     #[arg(long = "line", value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     start_line: Option<u32>,
 
+    /// Make an author-supplied review guide available when the review is ready.
+    #[arg(long, value_name = "PATH")]
+    guide: Option<PathBuf>,
+
     /// Review every tracked file in the cwd's git repo.
     #[arg(
         short = 'A',
@@ -163,6 +169,13 @@ enum Subcmd {
         #[command(subcommand)]
         command: ReviewCommand,
     },
+    /// Prepare a review guide in the background.
+    Prepare(PrepareCommand),
+    /// Inspect or validate a review guide without opening the TUI.
+    Guide {
+        #[command(subcommand)]
+        command: GuideSubcmd,
+    },
     /// Update the installed tuicr binary.
     Update {
         /// Install a specific SemVer release, including an older known-good version.
@@ -196,6 +209,163 @@ struct PrCommand {
 
     #[command(flatten)]
     options: TuiOptions,
+}
+
+/// Non-interactive operations on the same loaded review as the TUI.
+#[derive(Debug, Clone)]
+pub enum GuideCommand {
+    Prepare {
+        guide: Option<PathBuf>,
+        wait: bool,
+        print_prompt: bool,
+    },
+    Outline,
+    Check {
+        path: PathBuf,
+    },
+}
+
+#[derive(Args, Debug)]
+struct PrepareCommand {
+    #[command(flatten)]
+    target: HeadlessTarget,
+    /// Audit this supplied review guide instead of writing one.
+    #[arg(
+        id = "prepare_guide",
+        long = "guide",
+        value_name = "PATH",
+        global = true
+    )]
+    guide: Option<PathBuf>,
+    /// Wait for preparation to finish; exit non-zero on failure.
+    #[arg(long, global = true)]
+    wait: bool,
+    /// Print the effective write, audit and Ask prompts without starting a job.
+    #[arg(long, global = true)]
+    print_prompt: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum GuideSubcmd {
+    /// Print a compact outline of every changed hunk and the diff digest.
+    Outline(HeadlessTarget),
+    /// Check a guide's anchors against the reviewed diff.
+    Check(CheckGuideCommand),
+}
+
+#[derive(Args, Debug)]
+struct HeadlessTarget {
+    #[command(flatten)]
+    options: HeadlessTargetOptions,
+    #[command(subcommand)]
+    pr: Option<HeadlessPr>,
+}
+
+#[derive(Args, Debug)]
+#[command(subcommand_precedence_over_arg = true)]
+struct CheckGuideCommand {
+    #[command(flatten)]
+    options: HeadlessTargetOptions,
+    /// Review guide JSON file for a local review.
+    #[arg(value_name = "PATH")]
+    path: Option<PathBuf>,
+    #[command(subcommand)]
+    pr: Option<CheckGuidePr>,
+}
+
+#[derive(Subcommand, Debug)]
+enum HeadlessPr {
+    /// Review a pull request or merge request.
+    #[command(visible_alias = "mr")]
+    Pr { target: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum CheckGuidePr {
+    /// Check a guide for a pull request or merge request.
+    #[command(visible_alias = "mr")]
+    Pr {
+        target: String,
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+    },
+}
+
+// Global arguments propagate through nested PR commands. Keep their clap IDs
+// separate from TuiOptions so they cannot become top-level TUI arguments.
+#[derive(Args, Debug)]
+struct HeadlessTargetOptions {
+    /// Commit range / revset to review (syntax depends on VCS backend).
+    #[arg(
+        id = "headless_revisions",
+        short = 'r',
+        long = "revisions",
+        value_name = "REVSET",
+        allow_hyphen_values = true,
+        global = true
+    )]
+    revisions: Option<String>,
+    /// Filter the diff to this file or directory.
+    #[arg(id = "headless_path", short = 'p', long = "path", value_name = "PATH", value_parser = non_empty_path, global = true)]
+    path_filter: Option<String>,
+    /// Review uncommitted changes, optionally combined with -r.
+    #[arg(
+        id = "headless_working_tree",
+        short = 'w',
+        long = "working-tree",
+        global = true
+    )]
+    working_tree: bool,
+    /// Override the forge repository for PR operations.
+    #[arg(id = "headless_repo_url", long = "repo-url", value_name = "URL", value_parser = parse_repo_url, global = true)]
+    repo_url: Option<String>,
+    /// Use a named Git remote for PR operations.
+    #[arg(id = "headless_remote", long = "remote", value_name = "NAME", value_parser = clap::builder::NonEmptyStringValueParser::new(), global = true)]
+    remote: Option<String>,
+}
+
+impl HeadlessTargetOptions {
+    fn into_args(self, pr_target: Option<String>, guide_command: GuideCommand) -> CliArgs {
+        CliArgs {
+            revisions: self.revisions,
+            working_tree: self.working_tree,
+            path_filter: self.path_filter,
+            repo_url: self.repo_url,
+            remote: self.remote,
+            pr_target,
+            guide_command: Some(guide_command),
+            ..CliArgs::default()
+        }
+    }
+}
+
+impl HeadlessTarget {
+    fn into_args(self, command: GuideCommand) -> CliArgs {
+        self.options
+            .into_args(self.pr.map(|HeadlessPr::Pr { target }| target), command)
+    }
+}
+
+impl CheckGuideCommand {
+    fn into_args(self) -> Result<CliArgs, clap::Error> {
+        let (pr, path) = match (self.pr, self.path) {
+            (Some(CheckGuidePr::Pr { target, path }), None) => (Some(target), path),
+            (None, Some(path)) => (None, path),
+            (Some(_), Some(_)) => {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "Put the guide path after the PR target: `tuicr guide check pr TARGET PATH`",
+                ));
+            }
+            (None, None) => {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::MissingRequiredArgument,
+                    "`tuicr guide check` requires the path to a review guide",
+                ));
+            }
+        };
+        Ok(self.options.into_args(pr, GuideCommand::Check { path }))
+    }
 }
 
 /// Non-interactive review session commands.
@@ -336,20 +506,21 @@ pub enum LineSideArg {
     New,
 }
 
-impl From<Cli> for CliArgs {
-    fn from(cli: Cli) -> Self {
-        let (options, pr_target, review_command, update_version, update_command) = match cli.command
+impl Cli {
+    fn into_args(self) -> Result<CliArgs, clap::Error> {
+        let (options, pr_target, review_command, update_version, update_command) = match self
+            .command
         {
             Some(Subcmd::Tui(command)) => match command.command {
                 Some(TuiSubcmd::Pr(pr)) => (
-                    cli.tui_options.merge(command.options).merge(pr.options),
+                    self.tui_options.merge(command.options).merge(pr.options),
                     Some(pr.target),
                     None,
                     None,
                     false,
                 ),
                 None => (
-                    cli.tui_options.merge(command.options),
+                    self.tui_options.merge(command.options),
                     None,
                     None,
                     None,
@@ -357,7 +528,7 @@ impl From<Cli> for CliArgs {
                 ),
             },
             Some(Subcmd::Pr(pr)) => (
-                cli.tui_options.merge(pr.options),
+                self.tui_options.merge(pr.options),
                 Some(pr.target),
                 None,
                 None,
@@ -366,10 +537,25 @@ impl From<Cli> for CliArgs {
             Some(Subcmd::Review { command }) => {
                 (TuiOptions::default(), None, Some(command), None, false)
             }
+            Some(Subcmd::Prepare(command)) => {
+                let args = command.target.into_args(GuideCommand::Prepare {
+                    guide: command.guide,
+                    wait: command.wait,
+                    print_prompt: command.print_prompt,
+                });
+                return merge_headless(self.tui_options, args);
+            }
+            Some(Subcmd::Guide { command }) => {
+                let args = match command {
+                    GuideSubcmd::Outline(target) => target.into_args(GuideCommand::Outline),
+                    GuideSubcmd::Check(target) => target.into_args()?,
+                };
+                return merge_headless(self.tui_options, args);
+            }
             Some(Subcmd::Update { version }) => (TuiOptions::default(), None, None, version, true),
-            None => (cli.tui_options, None, None, None, false),
+            None => (self.tui_options, None, None, None, false),
         };
-        Self {
+        Ok(CliArgs {
             theme: options.theme,
             appearance: options.appearance,
             output_to_stdout: options.stdout,
@@ -380,14 +566,40 @@ impl From<Cli> for CliArgs {
             file_path: options.file_path,
             all_files: options.all_files,
             start_line: options.start_line,
+            guide: options.guide,
+            guide_command: None,
             pr_target,
             repo_url: options.repo_url,
             remote: options.remote,
             review_command,
             update_command,
             update_version,
+        })
+    }
+}
+
+fn merge_headless(root: TuiOptions, mut args: CliArgs) -> Result<CliArgs, clap::Error> {
+    for (flag, given) in [
+        ("--file", root.file_path.is_some()),
+        ("--all-files", root.all_files),
+        ("--line", root.start_line.is_some()),
+        ("--guide before the command", root.guide.is_some()),
+    ] {
+        if given {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::ArgumentConflict,
+                format!("{flag} cannot be used with headless preparation or guide commands"),
+            ));
         }
     }
+    // Presentation-only root flags do not affect the loaded review. Target
+    // options match TUI precedence: the innermost value wins.
+    args.revisions = args.revisions.or(root.revisions);
+    args.working_tree |= root.working_tree;
+    args.path_filter = args.path_filter.or(root.path_filter);
+    args.repo_url = args.repo_url.or(root.repo_url);
+    args.remote = args.remote.or(root.remote);
+    Ok(args)
 }
 
 impl TuiOptions {
@@ -401,6 +613,7 @@ impl TuiOptions {
             || self.path_filter.is_some()
             || self.file_path.is_some()
             || self.start_line.is_some()
+            || self.guide.is_some()
             || self.all_files
             || self.repo_url.is_some()
             || self.remote.is_some()
@@ -417,6 +630,7 @@ impl TuiOptions {
             path_filter: later.path_filter.or(self.path_filter),
             file_path: later.file_path.or(self.file_path),
             start_line: later.start_line.or(self.start_line),
+            guide: later.guide.or(self.guide),
             all_files: self.all_files || later.all_files,
             repo_url: later.repo_url.or(self.repo_url),
             remote: later.remote.or(self.remote),
@@ -437,7 +651,37 @@ impl Cli {
                 ),
             )),
             _ => {
-                let args: CliArgs = self.into();
+                let args = self.into_args()?;
+                if args.guide.is_some() && args.start_line.is_some() {
+                    return Err(clap::Error::raw(
+                        clap::error::ErrorKind::ArgumentConflict,
+                        "--guide and --line both select a starting position",
+                    ));
+                }
+                if args.guide.is_some() && (args.file_path.is_some() || args.all_files) {
+                    return Err(clap::Error::raw(
+                        clap::error::ErrorKind::ArgumentConflict,
+                        "--guide requires a diff, not --file or --all-files",
+                    ));
+                }
+                if args.guide_command.is_some()
+                    && !matches!(
+                        args.guide_command,
+                        Some(GuideCommand::Prepare {
+                            print_prompt: true,
+                            ..
+                        })
+                    )
+                    && args.pr_target.is_none()
+                    && args.revisions.is_none()
+                    && args.path_filter.is_none()
+                    && !args.working_tree
+                {
+                    return Err(clap::Error::raw(
+                        clap::error::ErrorKind::MissingRequiredArgument,
+                        "Specify a review target (-w, -r, --path or pr)",
+                    ));
+                }
                 if args.start_line.is_some() && args.pr_target.is_some() {
                     return Err(clap::Error::raw(
                         clap::error::ErrorKind::ArgumentConflict,
@@ -568,6 +812,23 @@ pub fn parse_cli_args() -> CliArgs {
     }
 }
 
+pub fn parse_tracked_prepare_args(args: Vec<std::ffi::OsString>) -> Result<CliArgs, clap::Error> {
+    let args = Cli::try_parse_from(args).and_then(Cli::try_into_args)?;
+    if !matches!(
+        args.guide_command,
+        Some(GuideCommand::Prepare {
+            print_prompt: false,
+            ..
+        })
+    ) {
+        return Err(clap::Error::raw(
+            clap::error::ErrorKind::InvalidValue,
+            "Expected a tracked preparation target",
+        ));
+    }
+    Ok(args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,6 +836,124 @@ mod tests {
 
     fn parse_for_test(args: &[&str]) -> Result<CliArgs, clap::Error> {
         Cli::try_parse_from(args).and_then(Cli::try_into_args)
+    }
+
+    #[test]
+    fn should_parse_supplied_guide_and_prepare_for_local_and_pr() {
+        let local = parse_for_test(&["tuicr", "-w", "--guide", "guide.json"]).unwrap();
+        assert_eq!(
+            local.guide.as_deref(),
+            Some(std::path::Path::new("guide.json"))
+        );
+
+        let prepare = parse_for_test(&[
+            "tuicr",
+            "prepare",
+            "pr",
+            "12",
+            "--repo-url",
+            "https://github.com/acme/demo",
+            "--wait",
+            "--guide",
+            "guide.json",
+        ])
+        .unwrap();
+        assert_eq!(prepare.pr_target.as_deref(), Some("12"));
+        assert!(prepare.repo_url.is_some());
+        assert!(matches!(
+            prepare.guide_command,
+            Some(GuideCommand::Prepare {
+                guide: Some(_),
+                wait: true,
+                ..
+            })
+        ));
+        let outline = parse_for_test(&[
+            "tuicr",
+            "guide",
+            "outline",
+            "-r",
+            "HEAD~1..HEAD",
+            "-p",
+            "src",
+        ])
+        .unwrap();
+        assert_eq!(outline.revisions.as_deref(), Some("HEAD~1..HEAD"));
+        assert_eq!(outline.path_filter.as_deref(), Some("src"));
+        assert!(matches!(outline.guide_command, Some(GuideCommand::Outline)));
+    }
+
+    #[test]
+    fn should_require_headless_target_except_when_printing_prompts() {
+        let err = parse_for_test(&["tuicr", "prepare"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+        parse_for_test(&["tuicr", "prepare", "--print-prompt"]).unwrap();
+        let err = parse_for_test(&["tuicr", "prepare", "-w", "pr", "12"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn should_parse_guide_check_path_after_local_or_pr_target() {
+        for (args, target) in [
+            (&["tuicr", "guide", "check", "-w", "guide.json"][..], None),
+            (
+                &[
+                    "tuicr",
+                    "guide",
+                    "check",
+                    "pr",
+                    "12",
+                    "guide.json",
+                    "--remote",
+                    "origin",
+                ][..],
+                Some("12"),
+            ),
+        ] {
+            let parsed = parse_for_test(args).unwrap();
+            assert_eq!(parsed.pr_target.as_deref(), target);
+            let Some(GuideCommand::Check { path }) = parsed.guide_command else {
+                panic!("expected a guide check");
+            };
+            assert_eq!(path, PathBuf::from("guide.json"));
+        }
+    }
+
+    #[test]
+    fn should_merge_headless_targets_before_or_after_commands() {
+        for argv in [
+            &[
+                "tuicr",
+                "--no-update-check",
+                "-w",
+                "guide",
+                "outline",
+                "-p",
+                "src",
+            ][..],
+            &[
+                "tuicr", "--theme", "dark", "guide", "outline", "-p", "src", "-w",
+            ][..],
+            &["tuicr", "-p", "src", "prepare", "-w"][..],
+            &["tuicr", "prepare", "-w", "-p", "src"][..],
+        ] {
+            let args = parse_for_test(argv).unwrap();
+            assert!(args.guide_command.is_some());
+            assert!(args.working_tree);
+            assert_eq!(args.path_filter.as_deref(), Some("src"));
+        }
+        let args = parse_for_test(&[
+            "tuicr", "--remote", "origin", "guide", "outline", "pr", "12",
+        ])
+        .unwrap();
+        assert_eq!(args.remote.as_deref(), Some("origin"));
+        assert_eq!(args.pr_target.as_deref(), Some("12"));
+        assert_eq!(
+            parse_for_test(&["tuicr", "-w", "prepare", "pr", "12"])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::ArgumentConflict,
+        );
     }
 
     #[test]

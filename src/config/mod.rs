@@ -179,6 +179,11 @@ pub struct AppConfig {
     pub theme_light: Option<String>,
     pub appearance: Option<String>,
     pub backend: Option<String>,
+    pub companion: Option<String>,
+    pub companion_model: Option<String>,
+    pub reviewer_model: Option<String>,
+    pub prepare_on_open: Option<bool>,
+    pub notify_ready: Option<bool>,
     pub comment_types: Option<Vec<CommentTypeConfig>>,
     pub show_file_list: Option<bool>,
     /// Which side of the diff the file list sits on: `"left"` (the default)
@@ -286,6 +291,11 @@ const KNOWN_KEYS: &[&str] = &[
     "theme_light",
     "appearance",
     "backend",
+    "companion",
+    "companion_model",
+    "reviewer_model",
+    "prepare_on_open",
+    "notify_ready",
     "comment_types",
     "show_file_list",
     "file_list_position",
@@ -602,6 +612,18 @@ fn normalize_override_extension(raw_key: &str, warnings: &mut Vec<String>) -> Op
     Some(key.to_ascii_lowercase())
 }
 
+fn review_agent_setting<T>(
+    table: &toml::Table,
+    key: &str,
+    expected: &str,
+    read: impl FnOnce(&Value) -> Option<T>,
+) -> Result<Option<T>> {
+    table
+        .get(key)
+        .map(|value| read(value).ok_or_else(|| anyhow!("Config key '{key}' must be {expected}")))
+        .transpose()
+}
+
 fn load_config_from_path(path: &Path) -> Result<ConfigLoadOutcome> {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
@@ -634,6 +656,22 @@ fn load_config_from_path(path: &Path) -> Result<ConfigLoadOutcome> {
         theme_light: read_string(table, "theme_light", &mut warnings),
         appearance: read_string(table, "appearance", &mut warnings),
         backend: read_enum(table, "backend", &["libgit2", "cli"], &mut warnings),
+        companion: review_agent_setting(table, "companion", "a string", |v| {
+            v.as_str().map(str::to_owned)
+        })?,
+        companion_model: review_agent_setting(table, "companion_model", "a string", |v| {
+            v.as_str().map(str::to_owned)
+        })?,
+        reviewer_model: review_agent_setting(table, "reviewer_model", "a string", |v| {
+            v.as_str().map(str::to_owned)
+        })?,
+        prepare_on_open: review_agent_setting(
+            table,
+            "prepare_on_open",
+            "a boolean",
+            Value::as_bool,
+        )?,
+        notify_ready: read_bool(table, "notify_ready", &mut warnings),
         comment_types: table
             .get("comment_types")
             .and_then(|v| parse_comment_types(v, &mut warnings)),
@@ -965,6 +1003,41 @@ fn parse_optional_nonempty_string(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn review_agent_config_keys_are_recognized_and_wrong_types_fail() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "companion = 'codex'\ncompanion_model = 'ask'\nreviewer_model = 'review'\nprepare_on_open = false\n",
+        )
+        .unwrap();
+        let outcome = load_config_from_path(&path).unwrap();
+        assert!(outcome.warnings.is_empty());
+        let config = outcome.config.unwrap();
+        assert_eq!(config.companion.as_deref(), Some("codex"));
+        assert_eq!(config.companion_model.as_deref(), Some("ask"));
+        assert_eq!(config.reviewer_model.as_deref(), Some("review"));
+        assert_eq!(config.prepare_on_open, Some(false));
+
+        for (key, invalid) in [
+            ("companion", "false"),
+            ("companion_model", "7"),
+            ("reviewer_model", "[]"),
+            ("prepare_on_open", "'false'"),
+        ] {
+            fs::write(&path, format!("{key} = {invalid}\n")).unwrap();
+            assert!(
+                load_config_from_path(&path)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(key)
+            );
+        }
+        fs::write(&path, b"companion = '\xff'\n").unwrap();
+        assert!(load_config_from_path(&path).is_err());
+    }
 
     #[test]
     fn should_round_trip_ignore_whitespace_config() {

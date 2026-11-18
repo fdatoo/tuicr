@@ -12,7 +12,7 @@ pub(crate) const AUTO_IGNORE_WHITESPACE_EXTENSIONS: &[&str] =
     &["json", "js", "jsx", "mjs", "cjs", "ts", "tsx", "rs"];
 
 /// Information about the VCS type
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VcsType {
     Git,
     Mercurial,

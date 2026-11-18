@@ -28,6 +28,7 @@ impl App {
     pub(crate) fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
         self.pr_info_rows_cache.replace(None);
+        self.companion.presentation = Default::default();
     }
 
     /// `Esc` on the picker itself (not the filter draft): revert the live

@@ -54,8 +54,28 @@ fn should_probe_keyboard_enhancement(output_to_stdout: bool, stdin_is_terminal: 
 }
 
 fn main() -> anyhow::Result<()> {
-    profile::init_from_env();
+    if let Some(result) = tuicr::prepare::run_worker_if_invoked() {
+        return result.map_err(Into::into);
+    }
 
+    profile::init_from_env();
+    if let Some((tracked, argv)) = tuicr::prepare::tracked_preparation()? {
+        let result = tuicr::cli::parse_tracked_prepare_args(argv)
+            .map_err(anyhow::Error::from)
+            .and_then(|args| run_app(args, Some(&tracked)));
+        if let Err(error) = &result {
+            tracked.report_failure(error.to_string())?;
+        }
+        return result;
+    }
+    let cli_args = profile::time("startup.parse_cli_args", parse_cli_args);
+    run_app(cli_args, None)
+}
+
+fn run_app(
+    mut cli_args: tuicr::cli::CliArgs,
+    tracked: Option<&tuicr::prepare::TrackedPreparation>,
+) -> anyhow::Result<()> {
     // Setup panic hook to restore terminal on panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -63,9 +83,6 @@ fn main() -> anyhow::Result<()> {
         original_hook(panic_info);
     }));
 
-    // Parse CLI arguments and resolve theme
-    // This also configures syntax highlighting colors before diff parsing
-    let mut cli_args = profile::time("startup.parse_cli_args", parse_cli_args);
     if cli_args.update_command {
         let outcome = match cli_args.update_version.as_ref() {
             Some(version) => update::update_to_version(version)?,
@@ -78,13 +95,30 @@ fn main() -> anyhow::Result<()> {
         tuicr::review_cli::run(review_command)?;
         return Ok(());
     }
+    if matches!(
+        cli_args.guide_command,
+        Some(tuicr::cli::GuideCommand::Prepare {
+            print_prompt: true,
+            ..
+        })
+    ) {
+        tuicr::prepare::print_prompts()?;
+        return Ok(());
+    }
+    let headless = cli_args.guide_command.is_some();
+
+    let launch_guide = cli_args
+        .guide
+        .as_deref()
+        .map(tuicr::prepare::read_guide)
+        .transpose();
 
     // Check keyboard enhancement support before enabling raw mode.
     // Skip when --stdout is used because the probe writes escape sequences to stdout,
     // which would leak into the captured export output.
     let keyboard_enhancement_supported = if should_probe_keyboard_enhancement(
         cli_args.output_to_stdout,
-        io::stdin().is_terminal(),
+        !headless && io::stdin().is_terminal(),
     ) {
         tuicr::terminal_state::supports_keyboard_enhancement()
     } else {
@@ -126,10 +160,13 @@ fn main() -> anyhow::Result<()> {
                 .and_then(|cfg| cfg.appearance.as_deref()),
         )
     })
-    .unwrap_or_else(|err| {
+    .map_err(|err| {
+        if headless {
+            return anyhow::anyhow!(err);
+        }
         eprintln!("Error: {err}");
-        std::process::exit(2);
-    });
+        std::process::exit(2)
+    })?;
     startup_warnings.extend(theme_warnings);
     if let Ok(dir) = config::syntaxes_dir() {
         startup_warnings.extend(profile::time("startup.load_user_syntaxes", || {
@@ -147,6 +184,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let no_update_check = cli_args.no_update_check
+        || headless
         || config_outcome
             .config
             .as_ref()
@@ -285,6 +323,9 @@ fn main() -> anyhow::Result<()> {
             app
         }
         Err(e) => {
+            if headless {
+                return Err(e.into());
+            }
             eprintln!("Error: {e}");
             // The "you need to be in a git repo" hint is only meaningful
             // when the failure was the absence of a repo. For other
@@ -304,6 +345,10 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
     };
+
+    if let Some(command) = cli_args.guide_command.take() {
+        return tuicr::prepare::run_cli(&mut app, command, tracked).map_err(Into::into);
+    }
 
     // Commit selector presentation/behavior prefs. `initial_commit_selection`
     // also fed `App::new` for the initial `-r`/PR range; keep it on the app so
@@ -417,6 +462,21 @@ fn main() -> anyhow::Result<()> {
     if let Some(message) = preferred_startup_warning(&startup_warnings) {
         app.set_warning(message);
     }
+    match launch_guide {
+        Ok(Some(guide)) => app.queue_supplied_guide(guide),
+        Ok(None) => {}
+        Err(error) => app.set_error(format!("Review guide: {error}")),
+    }
+    if cli_args.guide.is_none() {
+        app.maybe_prepare_on_open();
+    }
+    app.configure_preparation_repo(cli_args.remote.as_deref(), cli_args.repo_url.as_deref());
+    let notify_ready = config_outcome
+        .config
+        .as_ref()
+        .and_then(|cfg| cfg.notify_ready)
+        .unwrap_or(true);
+    let notification_in_tmux = std::env::var_os("TMUX").is_some();
 
     // Track pending z command for zz centering
     let mut pending_z = false;
@@ -469,6 +529,9 @@ fn main() -> anyhow::Result<()> {
         needs_redraw |= app.poll_editor_launches();
         needs_redraw |= app.poll_persisted_session_changes();
         needs_redraw |= app.poll_diff_watch_changes();
+        needs_redraw |= app.poll_companion();
+        needs_redraw |= app.poll_review_guide();
+        needs_redraw |= app.poll_preparation_ui(notify_ready, notification_in_tmux);
         needs_redraw |= pr_pending;
 
         if needs_redraw {
@@ -497,6 +560,7 @@ fn main() -> anyhow::Result<()> {
             execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
             needs_redraw = false;
         }
+        app.write_ready_notifications(terminal.backend_mut())?;
 
         // Handle events. Every already-queued event is consumed before the next
         // repaint: a trackpad gesture or held key delivers events faster than a
@@ -513,6 +577,15 @@ fn main() -> anyhow::Result<()> {
             // next iteration even though they short-circuit past the match.
             needs_redraw = true;
             let event = event::read()?;
+            match &event {
+                Event::FocusLost => app.guide_focus_lost(),
+                Event::Key(key) if key.kind != KeyEventKind::Release => app.guide_input_activity(),
+                Event::Mouse(mouse) if mouse.kind != crossterm::event::MouseEventKind::Moved => {
+                    app.guide_input_activity();
+                }
+                Event::Paste(_) => app.guide_input_activity(),
+                _ => {}
+            }
             // Down/Up Release flips the `*_released_since_arm` flag so the
             // primed two-press file walk in single-file view requires a
             // deliberate release + press; held-key auto-repeat (Repeat
@@ -664,6 +737,12 @@ fn main() -> anyhow::Result<()> {
                     if pending_leader {
                         pending_leader = false;
                         match key.code {
+                            crossterm::event::KeyCode::Char('a') if key.modifiers.is_empty() => {
+                                app.open_companion(false);
+                                continue;
+                            }
+                            // Visual mode only claims the companion chord.
+                            _ if app.input_mode == InputMode::VisualSelect => {}
                             crossterm::event::KeyCode::Char('e') => {
                                 app.toggle_file_list();
                                 continue;
@@ -838,7 +917,7 @@ fn main() -> anyhow::Result<()> {
                             }
                             Ok(Ok(EditorOutcome::Finished)) => {
                                 if app.diff_source.includes_worktree_changes() {
-                                    match app.reload_diff_files() {
+                                    match app.reload_diff_view() {
                                         Ok((count, invalidated)) => {
                                             let invalidated_suffix = if invalidated > 0 {
                                                 format!(", {invalidated} changed since last review")
@@ -869,7 +948,10 @@ fn main() -> anyhow::Result<()> {
                 // ratatui clears on its own only when the size changed. A
                 // font change, or a resize that lands back on the same size,
                 // can leave stale cells it would never rewrite.
-                Event::Resize(..) => app.request_full_redraw(),
+                Event::Resize(..) => {
+                    app.keep_guide_stop_in_view();
+                    app.request_full_redraw();
+                }
                 Event::Paste(text) => {
                     // Bracketed-paste payload — route to whichever handler is
                     // currently accepting text input. Other modes ignore.
@@ -889,6 +971,9 @@ fn main() -> anyhow::Result<()> {
             break;
         }
     }
+
+    app.guide_focus_lost();
+    app.shutdown_companion();
 
     terminal.restore()?;
 

@@ -218,6 +218,7 @@ impl BbPullRequest {
             title: self.title,
             author: self.author.and_then(|author| author.label()),
             head_ref_name: self.source.branch.name.clone(),
+            head_sha: Some(self.source.hash()).filter(|sha| !sha.is_empty()),
             base_ref_name: self.destination.branch.name.clone(),
             updated_at: self.updated_on,
             last_commit_at: None,

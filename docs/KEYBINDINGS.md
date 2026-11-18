@@ -19,6 +19,7 @@ Full reference. Press `?` inside tuicr for an in-app version of this list.
 | `{N}{motion}` | Vim-style count prefix — repeats `j` / `k` / `h` / `l` / `{` / `}` / `[` / `]` `N` times |
 | `{` / `}` | Jump to previous / next file |
 | `<leader>p` | Open the file picker (see below) |
+| `a` (or `<leader>a`) | Ask privately about the current diff line, visual selection or comment |
 | `[` / `]` | Jump to previous / next hunk |
 | `m` / `M` | Jump to next / previous comment |
 | `/` | Search within diff (case-insensitive regex); matches on diff content are highlighted and the status bar shows the `[current/total]` position (headers, comments, and PR info are searchable but not highlighted) |
@@ -49,6 +50,149 @@ apply. The diff's current file starts selected.
 | `/` | Filter paths by case-insensitive substring; the list narrows as you type. `↑` / `↓` move the selection, `Enter` jumps to it and closes, `Esc` drops the filter and keeps the popup open |
 | `Enter` | Jump to the selected file, the same as `Enter` in the file tree (single-file view switches to it) |
 | `Esc` | Close without moving |
+
+## Review guide
+
+In the normal diff footer, `:prepare` appears when no guide is installed
+and preparation isn't running. When a guide is ready, a line above the diff
+shows **Review ready**, the stop count and estimate, and `. start`. It stays
+there without moving the cursor or taking focus. Press `.` or run `:guide`
+to enter. After `:guide off`, **Review paused** offers `. resume`;
+`:guide off` again hides that line. Narrow diff panes show the action first.
+
+When `:prepare` installs a replacement in the open review, it pauses the
+guide without moving the cursor. `. resume` starts at the first available
+unchecked stop. Guide verdicts carry over only when the stop ID and its
+anchored block text both match.
+If the diff has changed since preparation, the map shows **Earlier version · :prepare**
+(**Stale · :prepare** in a narrow pane) until an up-to-date guide is installed.
+
+Stories group stops by behavior. The stop card above the diff states the
+claim, names the block and enclosing symbol when known, and shows the
+explanation and any risks. The gutter marks the block your verdict covers.
+Its diff colors stay unchanged while surrounding rows dim. Moving off the
+stop restores normal contrast; `'` returns to the block.
+The map gives the current stop an accent bar and up to two lines; the other
+stops stay compact so you can scan the story.
+Finished stories collapse to their verdict count. Select the heading and
+press `Enter` to revisit the story.
+Clipped text ends in `…`. Run `:guide detail` to read the full claim,
+location, risk or test warnings, and explanation in a private view.
+Scroll with `j` / `k` and press `Esc` to return to the diff.
+
+| Diff key | Action |
+|---|---|
+| `.` | Start or resume; at a stop, record Checks out and advance. If you've moved away, return without recording a verdict |
+| `K` | Explicitly record Checks out and advance. Use this instead of `.` to pass a risky, untested or doubtful stop |
+| `x` | Open a range comment prefilled from the claim. Saving records Wrong and advances; cancelling leaves the stop undecided |
+| `p` | Record Parked and advance; parked is not verified |
+| `,` | Go to the previous stop without changing its verdict |
+| `'` | Return to the current stop after a detour |
+| `t` | Switch between the map and file tree while inside the guide |
+| `a` / `<leader>a` | Open Ask; at the stop, use its prepared explanation and follow-ups |
+
+The configured leader and existing bindings take precedence. Verdicts are saved
+as they're made; re-entering a guide resumes at the next available stop without
+a verdict. Checking out a stop also marks its hunk reviewed only if the block
+covers every changed line of that hunk. Stops hidden by file filters are skipped.
+
+### Map sidebar
+
+The map takes the place of the file tree when you enter the guide. It shows
+your place, verdicts, risk items, the estimate for checking the stops, and
+active review time. The map header, `:coverage`, and the coverage note
+report **covers N of M hunks**: how many distinct changed text hunks have
+a stop, not how many hunks you verified. When the walk ends, the stop card
+reports parked stops and unreviewed supporting hunks. Focus the map with
+the normal [panel focus](#panel-focus) keys.
+
+| Map key | Action |
+|---|---|
+| `j` / `k`, `↓` / `↑` | Select a stop or supporting group |
+| `g` / `G` | Select the first / last entry |
+| `Enter` | Jump to the selected stop, or show a selected supporting group's note |
+| `D` | Dismiss the selected mechanical supporting group. Supporting groups open once every story stop has a verdict; claimed groups cannot be dismissed in bulk |
+| `t` | Return to the file tree; `t` there brings back the map |
+
+### Spot-check and coverage
+
+`:spot` walks a repeatable sample of up to five supporting hunks, preferring
+groups whose classification is only claimed. `.` or `K` checks out a hunk,
+`x` opens a range comment (saving records Wrong), `p` parks it, and `Esc`
+stops the walk. Run `:spot` again to resume for the same diff. If a sampled
+hunk is filtered out, reveal its file and resume.
+
+`:coverage` opens the read-only record of story and stop verdicts, risk items,
+supporting changes and spot-checks, review marks, and active time. Scroll with
+`j` / `k`, `↑` / `↓`, or `PgDn` / `PgUp`; `Esc`, `q`, or `?` closes it.
+With a guide, Markdown review exports also include a factual coverage note.
+
+### Reviewing changes after feedback
+
+In a local review, reload with `:e` after the author makes changes, then use
+`:changes` with or without a prepared guide. It walks **Changed since you
+started**, the first story in the map, using the same stop keys. Each stop
+requires an explicit `K`, `x`, or `p`, and can quote nearby feedback. The
+story compares reviewable text with a private, size-capped baseline captured
+at the start of the review, not with HEAD. It does not call a provider.
+If the story detects a change outside the current diff, it lists the file
+and line (when known) as **no longer in diff**. These entries are
+informational: they do not jump to code or need a verdict.
+
+Unchanged stops in an older guide remain navigable; the map tells you
+`:prepare` updates it for the new diff. Draft comments move with matching
+code when its location is unambiguous. Otherwise the comment stays at its
+last location and says **Code changed since this comment**. With diff watch
+enabled, the Ask panel stays open during reload; a thread whose anchor
+changed is labeled as being about earlier code.
+
+## Private Ask
+
+Press `a` on a diff line, visual range or comment, including a comment
+selected in the comment navigator. `<leader>a` and `:ask` also open Ask.
+The panel is docked below the diff so you can keep reading the code. At a
+guide stop it shows the prepared explanation and highlights the first
+prepared follow-up, if there is one. With an empty input, `Enter` answers
+the selected follow-up locally. A typed question takes priority. Answers
+to new questions stream and are saved in full. After completion, at most
+three sentences are shown initially. Prepared follow-ups and replies to
+an explicit request for more aren't folded.
+
+| Ask key | Action |
+|---|---|
+| `Enter` | Send a typed question, or show the selected prepared follow-up with no provider call |
+| `↑` / `↓`, `PgUp` / `PgDn` | Scroll the answer or select an entry in history. With prepared follow-ups shown, `↑` / `↓` selects one |
+| `Ctrl-o` | Reveal the rest of the latest folded answer locally; if none is hidden, ask the provider for more detail |
+| `Ctrl-x` | Cancel the active request and restore its submitted text to that thread's input, keeping any newer text |
+| `Ctrl-↑` / `Ctrl-↓` | Grow / shrink the panel |
+| Mouse wheel | Scroll the pane under the pointer, including the diff or Ask panel |
+| `Shift-↑` / `Shift-↓` | Scroll the diff while Ask has focus |
+| `Shift-←` / `Shift-→` | Pan the diff while Ask has focus, when line wrap is off |
+| `Tab` / `Shift-Tab` | Switch between the thread and private history |
+| `Enter` in history | Open the selected thread and jump to its code if the anchor is still available |
+| `Ctrl-g` | Confirm the concern you've typed (or your latest eligible question) as context for drafting |
+| `Ctrl-d` | Draft feedback using your typed instruction or a concern from the thread |
+| `Ctrl-e` | Open the draft in the normal comment editor. Edit it and save with `Ctrl-s` to make it a review comment |
+| `Esc` | Close Ask and return to your review |
+
+About 45 seconds without provider activity ends the request with an error,
+without an automatic retry. Only an empty or unusable answer (such as raw
+tool-protocol output) is retried once. Failed or cancelled answers aren't
+saved.
+
+Answers render Markdown and highlight language-tagged code. Claude can read
+and search a read-only snapshot of the review revision, including files outside
+the diff. For PRs, a matching clone can supply that revision; GitHub can also
+provide a pinned archive, whose contents may reflect export attributes. If the
+target revision or source is unavailable (including an unconfirmed old side),
+Ask uses the available diff context rather than an unrelated checkout.
+Codex has no file tools and receives only bounded context in the prompt.
+
+Ask history is stored under `companion/` in tuicr's platform data directory,
+separate from `reviews/`. To erase it locally, close tuicr and delete
+`companion/`. Private means not included in review comments, Markdown exports,
+or forge submissions. Questions, code context, and relevant thread history
+can still be sent to the configured AI provider to answer or draft feedback.
 
 ## Diff search
 
@@ -261,16 +405,26 @@ In command mode,
 | `:file <path>` | Write the same review to `<path>`, replacing any file there (`~/` means home) |
 | `:copy-url` | Copy the open PR URL to clipboard (PR mode) |
 | `:summary` | Show all pending local-draft comments; `j`/`k` select, `dd` deletes, and `Enter` jumps |
+| `:ask` / `:ask history` | Ask privately at the cursor / view the current review's private history |
+| `:prepare` | Start background preparation for the open diff (Unix only) |
+| `:prepare cancel` | Cancel preparation for the open review |
+| `:guide` | Enter the guide or return to the current stop |
+| `:guide off` | Pause the guide without clearing verdicts or review marks |
+| `:guide detail` | Read the current stop's full claim, location, warnings, and explanation; `j` / `k` scroll, `Esc` returns |
+| `:changes` | Walk changes from the original baseline of a local review, with or without a prepared guide |
+| `:map` | Switch the sidebar between map and file tree while inside the guide |
+| `:spot` | Start or resume a spot-check of supporting changes |
+| `:coverage` | View the coverage record |
 | `:diff` | Toggle diff view (unified / side-by-side) |
-| `:theme` | Open the runtime theme picker (live preview; `/` filters, `Enter` applies and saves, `Esc` reverts) |
-| `:theme <name>` | Apply and save `<name>` directly, without opening the picker |
+| `:theme` | Open the live-preview theme picker; `/` filters, `Enter` applies for this session, and `Esc` reverts |
+| `:theme <name>` | Apply `<name>` for this session without opening the picker |
 | `:focus` (`:f`) | Toggle single-file view |
 | `:stage` | Stage reviewed files (unstaged diffs only) |
 | `:vim` (`:set vim!`) / `:novim` (`:set novim`) / `:set vim` | Toggle / disable / enable vim modal editing in the comment box (overrides `comment_vim`) |
 | `:commits` (`:targets`) | Select commits to review |
 | `:prs` | Open the review target selector on Pull Requests |
 | `:sessions` (`:reviews`) | Resume a saved review for this checkout |
-| `:submit` | Open submit picker (Comment / Approve / Request changes / Draft) |
+| `:submit` | Open the PR submit picker. With a guide, show coverage and [guided choices](#guided-submit) |
 | `:submit comment` | Submit a Comment review |
 | `:submit approve` | Submit an Approve review |
 | `:submit request-changes` | Submit a Request-changes review |
@@ -288,7 +442,7 @@ In command mode,
 | `:set reviewed` | Show files already marked reviewed |
 | `:set noreviewed` | Hide files already marked reviewed |
 | `:set reviewed!` / `:reviewed` | Toggle files already marked reviewed |
-| `:clear` | Clear all comments |
+| `:clear` | Clear comments and reset reviewed marks |
 | `:clearc` | Clear comments without clearing reviewed marks |
 | `:help` (`:h`) | Open the help screen |
 | `:messages` | Open full details for the current error |
@@ -322,6 +476,28 @@ the filter and returns to navigation, `Esc` discards the filter edit without cha
 other `:` toggles, the choice is not written to `config.toml`; set `theme = "<name>"` there to keep
 it. `Esc` on the picker reverts the preview to whatever theme was active before it opened.
 
+### Guided submit
+
+With a review guide installed, `:submit` shows verified stops and stories,
+unverified risks, and supporting-change coverage. Use `j` / `k` or `↓` / `↑`
+to choose, `Enter` to continue, and `Esc` to cancel.
+
+| Choice | What happens |
+|---|---|
+| **Approve what I verified** | Preview a normal forge approval with a note describing the review's scope. The forge vote itself is not scoped |
+| **Approve** | Approve without a coverage note |
+| **Request changes** / **Comment** | Preview the review with a coverage note |
+| **Ask the author to split** | Open an unsent review comment suggesting a split along the stories |
+| **Save and come back** | Save the review and return to the diff without submitting |
+
+In the preview, press `e` to edit a coverage note. Clear its text and save
+the edit to omit it. `y` confirms and `n` or `Esc` cancels. If an approval has
+unverified risk items, the confirmation requires `y` (or `Y`), not `Enter`.
+Once confirmed, the note and saved comments are submitted through the usual
+forge review flow. The note is based on recorded coverage, not Ask history.
+
+### Forge support
+
 Not every forge supports every event:
 
 | Event | GitHub | GitLab | Gitea | Bitbucket | Azure DevOps | Gerrit |
@@ -353,6 +529,7 @@ retry); GitHub rejects an empty request-changes review, so it needs a comment th
 | `Enter` | Confirm local commit range, open PR, load more PRs, or resume a saved review |
 | `/` | Filter currently loaded PR rows locally |
 | `r` | In Pull Requests tab, cycle all open PRs / PRs requesting your review (the `pr_search` query on GitHub when set) / (GitHub) PRs requesting you by name |
+| `p` / `P` | In Pull Requests, prepare the selected PR in the background / cancel its preparation |
 | `a` | In Sessions tab, show or hide saved reviews holding no progress |
 | `dd` | In Sessions tab, delete the saved review under the cursor (asks to confirm) |
 | `Esc` | Return to the diff |
@@ -363,11 +540,18 @@ refetches the first page: all open PRs, then PRs requesting your review, then ba
 GitHub a third scope, `requested (me)`, sits between "requested" and "all": it lists only
 PRs that request your review by name, leaving out requests made to a team you belong to.
 
-The Sessions tab lists saved reviews for the current checkout, so you can pick one
-instead of retyping the commit range it was opened with. Rows show the review target,
-comment count, reviewed files, and age. Reviews with no comments and no reviewed files
-are omitted; press `a` to show them. Selecting a saved PR review re-fetches it from the
-forge, the same as opening it from the Pull Requests tab.
+The Sessions tab lists saved reviews for the current checkout, as well as
+preparing and ready guides. Saved-session rows show the target, comment count,
+reviewed files, and age. Sessions with no comments and no reviewed files are
+usually omitted; press `a` to show them. `Enter` on a preparation row opens
+its target. Selecting a PR re-fetches it from the forge, just like opening from
+Pull Requests. Browsing the list does not start preparation.
+
+Sessions labels a prepared PR **out of date** if the loaded PR list reports
+a changed head or the open review has a different diff. If tuicr doesn't
+have a current head or diff to compare, it shows `ready (prepared for SHA)`
+with the short SHA, or `ready (head unknown)` if the stored preparation
+doesn't identify a head. The row does not refetch the forge to check.
 
 Opening a different local target (a commit selection on the Local tab, or a saved review
 on the Sessions tab) first saves the review on screen, so its unsaved marks and comments

@@ -134,6 +134,7 @@ impl AzPullRequest {
             title: self.title,
             author,
             head_ref_name: strip_ref(&self.source_ref_name),
+            head_sha: self.last_merge_source_commit.map(|commit| commit.commit_id),
             base_ref_name: strip_ref(&self.target_ref_name),
             updated_at: self.creation_date,
             last_commit_at: None,

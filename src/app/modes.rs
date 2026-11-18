@@ -110,7 +110,7 @@ impl App {
 
     pub fn toggle_help(&mut self) {
         match self.input_mode {
-            InputMode::Help | InputMode::MessageDetails => {
+            InputMode::Help | InputMode::MessageDetails | InputMode::GuideDetails => {
                 self.input_mode = self.overlay_return_mode;
             }
             _ => {

@@ -14,7 +14,7 @@ use crate::forge::traits::{
 use crate::model::CommentType;
 use crate::theme::Theme;
 use crate::ui::comment_panel::{self, CommentTypePresentation};
-use crate::ui::diff_view::{HEADER_RULE, cursor_indicator, cursor_indicator_spaced};
+use crate::ui::diff_view::{DiffRows, HEADER_RULE, cursor_indicator, cursor_indicator_spaced};
 use crate::ui::styles;
 
 /// Every rendered PR-info line is prefixed with a two-column cursor indicator
@@ -115,6 +115,15 @@ pub fn append_pr_info_section(
     line_idx: &mut usize,
     current_line_idx: usize,
 ) {
+    emit_pr_info_section(app, lines, line_idx, current_line_idx);
+}
+
+pub(super) fn emit_pr_info_section(
+    app: &App,
+    lines: &mut impl PrSectionRows,
+    line_idx: &mut usize,
+    current_line_idx: usize,
+) {
     for pr_line in pr_info_display_lines(app).iter() {
         let mut pr_line = pr_line.clone();
         let indicator = cursor_indicator_spaced(*line_idx, current_line_idx);
@@ -135,6 +144,24 @@ pub fn append_pr_info_section(
 pub fn append_issue_comments_section(
     app: &App,
     lines: &mut Vec<Line<'static>>,
+    line_idx: &mut usize,
+    current_line_idx: usize,
+    content_width: usize,
+    visible: (usize, usize),
+) {
+    emit_issue_comments_section(
+        app,
+        lines,
+        line_idx,
+        current_line_idx,
+        content_width,
+        visible,
+    );
+}
+
+pub(super) fn emit_issue_comments_section(
+    app: &App,
+    lines: &mut impl PrSectionRows,
     line_idx: &mut usize,
     current_line_idx: usize,
     content_width: usize,
@@ -171,7 +198,8 @@ pub fn append_issue_comments_section(
         // exactly the offset `issue_comment_display_lines` expects.
         let rows = issue_comment_display_lines(comment, content_width.saturating_add(1));
         if !crate::ui::diff_view::comment_box_visible(*line_idx, rows, visible) {
-            crate::ui::diff_view::skip_comment_box(lines, line_idx, rows);
+            lines.skip(rows);
+            *line_idx += rows;
             continue;
         }
         for mut comment_line in
@@ -185,6 +213,32 @@ pub fn append_issue_comments_section(
             lines.push(comment_line);
             *line_idx += 1;
         }
+    }
+}
+
+/// PR sections can be collected in full or rendered directly to a viewport.
+pub(super) trait PrSectionRows {
+    fn push(&mut self, line: Line<'static>);
+    fn skip(&mut self, count: usize);
+}
+
+impl PrSectionRows for Vec<Line<'static>> {
+    fn push(&mut self, line: Line<'static>) {
+        Vec::push(self, line);
+    }
+
+    fn skip(&mut self, count: usize) {
+        self.resize_with(self.len() + count, Line::default);
+    }
+}
+
+impl PrSectionRows for DiffRows<'static> {
+    fn push(&mut self, line: Line<'static>) {
+        DiffRows::push(self, line);
+    }
+
+    fn skip(&mut self, count: usize) {
+        DiffRows::skip(self, count);
     }
 }
 
@@ -482,6 +536,7 @@ mod tests {
                 merged_at: None,
                 diff_start_sha: None,
             },
+            base_sha_confirmed: false,
             review_decision: Some("REVIEW_REQUIRED".to_string()),
             mergeable: Some("MERGEABLE".to_string()),
             merge_state: Some("BLOCKED".to_string()),

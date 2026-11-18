@@ -16,6 +16,16 @@ pub fn render_message_details(frame: &mut Frame, app: &mut App) {
         return;
     };
     let content = message.content.clone();
+    render_text_details(frame, app, "Messages", &content, true);
+}
+
+pub(super) fn render_text_details(
+    frame: &mut Frame,
+    app: &mut App,
+    title: &str,
+    content: &str,
+    is_error: bool,
+) {
     let theme = &app.theme;
     let area = frame.area();
 
@@ -26,12 +36,13 @@ pub fn render_message_details(frame: &mut Frame, app: &mut App) {
         .border_style(styles::border_style(theme, true));
     let inner = block.inner(area);
 
-    let paragraph = Paragraph::new(content.as_str())
-        .style(
-            Style::default()
-                .fg(theme.message_error_fg)
-                .bg(theme.panel_bg),
-        )
+    let foreground = if is_error {
+        theme.message_error_fg
+    } else {
+        theme.fg_primary
+    };
+    let paragraph = Paragraph::new(content)
+        .style(Style::default().fg(foreground).bg(theme.panel_bg))
         .wrap(Wrap { trim: false });
     app.help_state.total_lines = paragraph.line_count(inner.width);
     app.help_state.viewport_height = inner.height as usize;
@@ -51,7 +62,7 @@ pub fn render_message_details(frame: &mut Frame, app: &mut App) {
     };
     frame.render_widget(
         block.title(format!(
-            " Messages (j/k scroll, q/Esc close){scroll_indicator} "
+            " {title} (j/k scroll, q/Esc close){scroll_indicator} "
         )),
         area,
     );
@@ -123,6 +134,46 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
     frame.render_widget(block, area);
 
     let help_text = vec![
+        Line::from(Span::styled(
+            "Review Guide",
+            Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )),
+        Line::from(""),
+        Line::from("  :prepare / :prepare cancel   Start / cancel preparation"),
+        Line::from("  .         Start/return, or check out this stop and move on"),
+        Line::from("  :guide detail  Read the full stop (j/k scroll, Esc returns)"),
+        Line::from("  K         Check out explicitly (if risky, untested or doubtful)"),
+        Line::from("  x / p     Open a Wrong comment / park and advance"),
+        Line::from("  , / '     Previous stop / return to the current stop"),
+        Line::from("  t         Switch between the map and file tree"),
+        Line::from("  j/k/Enter In the map: select a row / open the selection"),
+        Line::from("  D         In the map: dismiss a mechanical supporting group"),
+        Line::from("  :spot     Spot-check supporting hunks (. / K, x, p; Esc stops)"),
+        Line::from("  :coverage Show the review record (j/k scroll, Esc closes)"),
+        Line::from("  Your configured leader takes precedence over guide keys."),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Private Ask",
+            Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )),
+        Line::from(""),
+        Line::from("  Enter     Send typed question, or answer selected follow-up"),
+        Line::from("  The first prepared follow-up starts selected at a guide stop."),
+        Line::from("  Up/Down   Scroll or select a prepared question/history item"),
+        Line::from("  Tab       Switch between this thread and private history"),
+        Line::from("  Enter     In history: open the thread and jump to its code"),
+        Line::from("  Ctrl-o    Show the rest of the answer, or ask for more"),
+        Line::from("  Ctrl-x    Cancel the request and restore submitted text"),
+        Line::from("  Ctrl-Up/Down  Grow/shrink the Ask panel"),
+        Line::from("  Mouse wheel   Scroll the pane under the pointer"),
+        Line::from("  Shift-Up/Down   Scroll the diff while Ask is open"),
+        Line::from("  Shift-Left/Right   Pan the diff when wrap is off"),
+        Line::from("  Ctrl-g    Confirm a concern to use in a feedback draft"),
+        Line::from("  Ctrl-d/e  Draft feedback / edit the draft; save to share it"),
+        Line::from("  Esc       Close Ask and return to the diff"),
+        Line::from("  New answers show three sentences first; the full answer is saved."),
+        Line::from("  45s without provider activity fails; only empty/bad answers retry."),
+        Line::from(""),
         Line::from(Span::styled(
             "Navigation",
             Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
@@ -632,6 +683,17 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
         ]),
         Line::from(vec![
             Span::styled(
+                if app.leader_key == 'a' {
+                    "  aa        "
+                } else {
+                    "  a         "
+                },
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Ask privately about the line or comment at the cursor"),
+        ]),
+        Line::from(vec![
+            Span::styled(
                 "  v/V       ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
@@ -656,6 +718,17 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw("Create comment for selected range"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                if app.leader_key == 'a' {
+                    "  aa        ".into()
+                } else {
+                    format!("  a / {leader}a    ")
+                },
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Ask privately about the selected code"),
         ]),
         Line::from(vec![
             Span::styled(
@@ -793,6 +866,13 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
             ),
             Span::raw("Pending comments; j/k select, dd delete, Enter jumps"),
         ]),
+        Line::from("  :ask / :ask history     Private question / review conversation"),
+        Line::from("  :guide / :guide off         Start or return / pause the guide"),
+        Line::from("  :guide detail               Read all current stop details"),
+        Line::from("  :changes                    Walk edits since this local review began"),
+        Line::from("  :map                        Switch map and file tree"),
+        Line::from("  :spot / :coverage           Spot-check / view the review record"),
+        Line::from("  p / P in Pull Requests    Start / cancel preparation for this PR"),
         Line::from(vec![
             Span::styled(
                 "  :stage    ",

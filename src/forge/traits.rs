@@ -298,6 +298,9 @@ pub struct PullRequestSummary {
     pub title: String,
     pub author: Option<String>,
     pub head_ref_name: String,
+    /// Source commit reported by the list endpoint, when available.
+    #[serde(default)]
+    pub head_sha: Option<String>,
     pub base_ref_name: String,
     pub updated_at: Option<DateTime<Utc>>,
     /// Committer date of the newest commit. Unlike `updated_at`, it moves
@@ -329,8 +332,8 @@ pub struct PullRequestDetails {
     pub head_ref_name: String,
     pub base_ref_name: String,
     pub head_sha: String,
-    /// The commit the displayed patch's **old side** lives at — the merge
-    /// base, not the base branch tip.
+    /// The patch's old-side commit when confirmed, otherwise the best-effort
+    /// base branch tip. See [`PullRequestInfo::base_sha_confirmed`].
     ///
     /// For three-dot PR diffs, `ForgeContextProvider`, PR editor snapshots,
     /// and the `pr_range_sha_pair` fallback parent all need this revision.
@@ -629,6 +632,9 @@ pub struct PullRequestIssueComment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequestInfo {
     pub details: PullRequestDetails,
+    /// `details.base_sha` is the displayed patch's old-side revision, not
+    /// an unconfirmed branch tip retained for existing best-effort callers.
+    pub base_sha_confirmed: bool,
     pub review_decision: Option<String>,
     pub mergeable: Option<String>,
     pub merge_state: Option<String>,
@@ -643,6 +649,7 @@ impl PullRequestInfo {
     pub fn from_details(details: PullRequestDetails) -> Self {
         Self {
             details,
+            base_sha_confirmed: false,
             review_decision: None,
             mergeable: None,
             merge_state: None,
@@ -744,15 +751,11 @@ pub trait ForgeBackend {
     ) -> Result<Vec<FilePatch>>;
     /// Resolve the commit the PR's displayed diff is actually taken *from*.
     ///
-    /// Forge PR diffs are three-dot: the old side is the merge base of the
-    /// base branch and the head, not the tip of the base branch. Backends
-    /// whose `base_sha` already *is* the merge base (GitLab's
-    /// `diff_refs.base_sha`) keep this default and report "no refinement
-    /// needed"; backends that report a branch tip override it so the old
-    /// side of context expansion and editor snapshots lines up with the patch.
+    /// For three-dot PR diffs, the old side is the merge base, not the base
+    /// branch tip. Backends which already know the diff base from metadata set
+    /// [`PullRequestInfo::base_sha_confirmed`] instead.
     ///
-    /// Best-effort: `None` on any failure leaves `base_sha` untouched, which
-    /// is the pre-existing behavior.
+    /// `None` leaves the reported `base_sha` and its certainty unchanged.
     fn resolve_diff_base_sha(&self, _pr: &PullRequestDetails) -> Option<String> {
         None
     }

@@ -348,6 +348,13 @@ impl PullRequestsTab {
         }
     }
 
+    pub(crate) fn loaded_rows(&self) -> &[PullRequestSummary] {
+        match self {
+            Self::Loaded { rows, .. } => rows,
+            _ => &[],
+        }
+    }
+
     /// Update scroll so cursor remains visible in a viewport of `height`.
     pub fn ensure_cursor_visible(&mut self, height: usize) {
         if let PullRequestsTab::Loaded {
@@ -495,6 +502,7 @@ mod tests {
             title: title.to_string(),
             author: Some(author.to_string()),
             head_ref_name: head.to_string(),
+            head_sha: None,
             base_ref_name: base.to_string(),
             updated_at: Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
             last_commit_at: None,

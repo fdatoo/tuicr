@@ -57,6 +57,11 @@ username = "user"
 diff_watch_interval_ms = 0
 
 backend = "libgit2"
+companion = "claude"
+companion_model = "haiku"
+reviewer_model = "sonnet"
+prepare_on_open = true
+notify_ready = true
 
 comment_types = [
   { id = "note", label = "question", definition = "ask for clarification", color = "yellow" },
@@ -125,8 +130,34 @@ session_header = true
 | `username`                 | `"user"`     | Display name stamped on local comments and used as the viewer identity for local comment coloring.                                                         |
 | `diff_watch_interval_ms`   | `0`          | Poll interval for re-reading the local diff so uncommitted changes show without `:e`. The same tick refreshes the commit pane, including the "Staged changes" and "Unstaged changes" rows. A commit-range review, from `-r` or picked in the commit selector, keeps its range in the pane. With `-w` it refreshes only those two rows. Without it the pane never gains them. `0` (default) disables it. Ignored for PR and `--all-files` reviews. |
 | `backend`                  | `libgit2`    | Git backend: `libgit2` or `cli`. Sparse-checkout repos auto-route to `cli`.                                                                                |
+| `companion` | `claude` | AI client for Ask and preparation: `claude` or `codex`. Requires that executable on `PATH` and an authenticated account. `TUICR_COMPANION` overrides this setting. |
+| `companion_model` | Provider default for Ask | Claude uses `haiku`; Codex uses its default model with low reasoning effort. `TUICR_COMPANION_MODEL` overrides this setting. |
+| `reviewer_model` | Provider default for preparation | Claude uses `sonnet`; Codex uses its default model with medium reasoning effort. `TUICR_REVIEWER_MODEL` overrides this setting. |
+| `prepare_on_open` | `true` | Start background preparation for an opened PR when needed. Does not prepare PRs merely shown in the list or prepare a local review automatically. `TUICR_PREPARE_ON_OPEN` overrides this setting. |
+| `notify_ready` | `true` | Emit a bell and terminal notification when the TUI observes a newly ready guide. Actual desktop notification support depends on the terminal. Does not affect preparation or in-app status. |
 | `comment_types`            | (none)       | Comment categories. Untyped by default. See [Comment types](#comment-types).                                                                               |
 | `export_legend`            | `true`       | Include the `Comment types:` legend in the exported review. Superseded by `legend` under [Export](#export).                                                |
+
+## Reviewer rules
+
+Put an optional UTF-8 `reviewer.md` next to `config.toml`. tuicr reads it
+at the start of each preparation and when building an Ask prompt. It appends
+up to 16 KiB to the built-in prompt as review criteria. The text is sent to
+the AI provider when a request is made, so don't put secrets in it.
+Run `tuicr prepare --print-prompt` to see the effective prompts without
+opening a review or contacting the provider.
+
+If the effective rules change, the map labels an existing prepared guide
+**Prepared with older rules**. The guide stays available; run `:prepare`
+to update it using the current rules.
+
+Example rules:
+
+```markdown
+- Flag a changed default that would alter existing users' behavior.
+- Check that retries reuse the original request ID.
+- If a test assertion was removed, say which behavior is no longer checked.
+```
 
 ## Whitespace comparison
 
@@ -148,7 +179,12 @@ settings affect only local VCS diffs; pull-request diffs are unchanged.
 
 Bundled themes:
 
-`dark`, `light`, `ayu-light`, `ayu-mirage`, `onedark`, `github-light`, `github-dark`, `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`, `everforest-dark`, `everforest-light`, `gruvbox-dark`, `gruvbox-light`, `nord-dark`, `nord-light`, `nord-dark-high-contrast`, `nord-light-high-contrast`, `solarized-light`, `solarized-dark`, `tokyo-night-storm`, `tokyo-night-day`.
+`dark`, `light`, `ayu-light`, `ayu-mirage`, `onedark`, `github-light`,
+`github-dark`, `github-dark-colorblind`, `catppuccin-latte`, `catppuccin-frappe`,
+`catppuccin-macchiato`, `catppuccin-mocha`, `everforest-dark`, `everforest-light`,
+`gruvbox-dark`, `gruvbox-light`, `nord-dark`, `nord-light`,
+`nord-dark-high-contrast`, `nord-light-high-contrast`, `solarized-light`,
+`solarized-dark`, `tokyo-night-storm`, `tokyo-night-day`.
 
 Local themes:
 
@@ -236,9 +272,9 @@ When multiple sources are set, tuicr resolves the theme in this order:
 6. `appearance` in config (only when no explicit theme or variants are set)
 7. Bundled default (`system`)
 
-Invalid `--theme` values cause an immediate non-zero exit. The same is true when a selected
-local theme file exists but is invalid. Invalid config-selected local themes emit startup warnings
-and fall back through normal precedence.
+An unknown `--theme` name or an invalid theme file selected by `--theme` exits
+with code `2`. An invalid theme selected in `config.toml` warns on startup
+and falls back through the list above.
 
 ## Syntaxes
 

@@ -15,7 +15,7 @@ use crate::model::{LineOrigin, LineRange, LineSide};
 use crate::theme::Theme;
 use crate::ui::comment_panel;
 use crate::ui::diff_view::{
-    FileBody, append_eof_gap, append_file_preamble, append_gap_and_hunk_header,
+    DiffRows, FileBody, append_eof_gap, append_file_preamble, append_gap_and_hunk_header,
     apply_horizontal_scroll, comment_box_visible, comment_type_presentation, cursor_indicator,
     diff_stat_title, paint_cursor_line_highlight, paint_unified_diff_rows_with,
     paint_visual_selection_overlay, populate_row_to_annotation, push_comment_bar,
@@ -49,7 +49,7 @@ fn wrap_unified_row<'a>(
 }
 
 fn unified_row_height(
-    lines: &[Line],
+    lines: &DiffRows<'_>,
     idx: usize,
     content_start: Option<usize>,
     flow_start: Option<usize>,
@@ -70,12 +70,12 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
     // When the diff is the only pane, drop the frame entirely — including its
     // title row. The file name and stats are folded into the top header line
     // instead (see status_bar::render_header) so there's a single header line.
-    let sole = app.is_diff_sole_pane();
+    let framed = crate::ui::diff_view::diff_has_border(app, area);
     let mut block = Block::default()
-        .borders(if sole { Borders::NONE } else { Borders::ALL })
+        .borders(if framed { Borders::ALL } else { Borders::NONE })
         .style(styles::panel_style(&app.theme))
         .border_style(styles::border_style(&app.theme, focused));
-    if !sole {
+    if framed {
         block = block
             .title(crate::ui::diff_view::diff_title(app, area.width))
             .title_top(diff_stat_title(app).right_aligned());
@@ -85,38 +85,32 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
     let comment_width = inner.width.saturating_sub(1) as usize;
     frame.render_widget(block, area);
 
-    // Update viewport height for scroll calculations
-    app.diff_state.viewport_height = inner.height as usize;
-    app.diff_inner_area = Some(inner);
-
-    // Size the PR-info rows (built below) at the real width, not last frame's.
-    app.sync_viewport_width(inner.width as usize);
+    let landing = crate::ui::diff_view::sync_diff_viewport(app, inner);
 
     // Reset comment input annotation offset (will be set if a comment input box is rendered)
     app.comment_input_annotation_offset = None;
 
     let lw = app.lineno_width();
 
-    // Build all diff lines for infinite scroll
     // Track line index to mark the current line (cursor position)
-    let mut lines: Vec<Line> = Vec::new();
     let mut content_rows = HashSet::new();
     let mut line_idx: usize = 0;
     let current_line_idx = app.diff_state.cursor_line;
 
-    // Only build the expensive per-diff-line spans for lines that are actually
-    // visible. Everything else still pushes (cheap) so `lines.len()` keeps
-    // matching `line_idx`, but the hot inner loops push `Line::default()` for
-    // off-screen rows. In Comment mode the scroll offset may be adjusted after
-    // building, so fall back to a full build there.
-    let (visible_start, visible_end) = crate::ui::diff_view::diff_visible_range(app, inner);
+    // In Comment mode the scroll offset may change while building, so the
+    // buffer retains every logical row in that mode.
+    let (visible_start, visible_end) = landing.as_ref().map_or_else(
+        || crate::ui::diff_view::diff_visible_range(app, inner),
+        |landing| landing.retained_range(usize::from(inner.height)),
+    );
+    let mut lines = DiffRows::new((visible_start, visible_end));
     let search_style = styles::search_match_style(&app.theme);
 
     // Records per-comment bar info — populated at each line-level comment
     // call site and consumed by the bar paint pass at the end of render.
     let mut comment_bars: Vec<crate::ui::diff_view::CommentBarAnchor> = Vec::new();
 
-    crate::ui::pr_info_panel::append_pr_info_section(
+    crate::ui::pr_info_panel::emit_pr_info_section(
         app,
         &mut lines,
         &mut line_idx,
@@ -133,7 +127,7 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
     );
     let mut input = review_section;
 
-    crate::ui::pr_info_panel::append_issue_comments_section(
+    crate::ui::pr_info_panel::emit_issue_comments_section(
         app,
         &mut lines,
         &mut line_idx,
@@ -178,6 +172,10 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                 .get(path)
                 .map(|r| &r.line_comments)
                 .unwrap_or(&crate::ui::diff_view::EMPTY_LINE_COMMENTS);
+            let cull_hunk = line_comments.is_empty()
+                && app.input_mode != InputMode::Comment
+                && (app.forge_review_threads.is_empty()
+                    || app.session.remote_comments_visibility == PrCommentsVisibility::Hide);
 
             for (hunk_idx, hunk) in file.hunks.iter().enumerate() {
                 if append_gap_and_hunk_header(
@@ -209,14 +207,23 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                     continue;
                 }
 
-                // Diff lines
-                for diff_line in &hunk.lines {
+                // With no inline boxes to count or draw, jump straight to the
+                // visible slice of even a very large hunk.
+                let visible = if cull_hunk {
+                    lines.visible_run(hunk.lines.len())
+                } else {
+                    0..hunk.lines.len()
+                };
+                lines.skip(visible.start);
+                line_idx += visible.start;
+                let suffix = hunk.lines.len() - visible.end;
+                for diff_line in &hunk.lines[visible] {
                     // Hot path: skip span/style allocation entirely for diff
                     // lines outside the viewport. Comment handling below still
                     // runs so `line_idx` stays exact and any comment box that
                     // crosses into the viewport is rendered.
                     if line_idx < visible_start || line_idx >= visible_end {
-                        lines.push(Line::default());
+                        lines.skip(1);
                         line_idx += 1;
                     } else {
                         let base_style = match diff_line.origin {
@@ -310,6 +317,10 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
 
                         lines.push(Line::from(line_spans));
                         line_idx += 1;
+                    }
+
+                    if cull_hunk {
+                        continue;
                     }
 
                     // Show line comments for both old side (deleted lines) and new side (added/context)
@@ -412,7 +423,7 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                                                     app,
                                                     &comment.comment_type,
                                                 ),
-                                                &comment.content,
+                                                &comment.display_content(),
                                                 line_range,
                                                 comment_width,
                                                 (comment.author != app.username)
@@ -599,7 +610,7 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                                                     app,
                                                     &comment.comment_type,
                                                 ),
-                                                &comment.content,
+                                                &comment.display_content(),
                                                 line_range,
                                                 comment_width,
                                                 (comment.author != app.username)
@@ -686,6 +697,8 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                         }
                     }
                 }
+                lines.skip(suffix);
+                line_idx += suffix;
             }
         }
 
@@ -762,6 +775,18 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
         |idx: usize| (gutter_wrap && content_rows.contains(&idx)).then_some(GUTTER_SPANS);
     let flow_start =
         |idx: usize| (!gutter_wrap && content_rows.contains(&idx)).then_some(GUTTER_SPANS);
+    if let Some(landing) = landing {
+        app.diff_state.scroll_offset = landing.offset(usize::from(inner.height), |idx| {
+            unified_row_height(
+                &lines,
+                idx,
+                content_start(idx),
+                flow_start(idx),
+                wrap,
+                viewport_width,
+            )
+        });
+    }
     scroll_comment_input_into_view(
         &mut app.diff_state.scroll_offset,
         input.input_box_range,
@@ -780,11 +805,8 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
         },
     );
 
-    let visible_lines_unscrolled: Vec<Line> = lines
-        .into_iter()
-        .skip(app.diff_state.scroll_offset)
-        .take(inner.height as usize)
-        .collect();
+    let visible_lines_unscrolled =
+        lines.into_visible(app.diff_state.scroll_offset, inner.height as usize);
 
     // Calculate the width of each line for max_content_width and visible line count
     let line_widths: Vec<usize> = visible_lines_unscrolled
@@ -906,6 +928,7 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
     // single cells regardless of cursor-line / selection underlays.
     crate::ui::diff_view::paint_comment_box_bar(frame, &overlay_ctx);
     crate::ui::diff_view::paint_comment_box_right_border(frame, &overlay_ctx);
+    crate::ui::diff_view::paint_private_thread_marks(frame, inner, app, lw, None);
 
     // Calculate screen position for comment cursor if in Comment mode
     if let Some(cursor_logical_line) = input.cursor_logical_line {
@@ -949,7 +972,7 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
 /// the spec; visible-but-resolved threads only render under `:comments all`.
 #[allow(clippy::too_many_arguments)]
 fn render_remote_threads_for_anchor(
-    lines: &mut Vec<ratatui::text::Line<'static>>,
+    lines: &mut DiffRows<'static>,
     line_idx: &mut usize,
     current_line_idx: usize,
     app: &App,
@@ -1021,7 +1044,7 @@ fn render_remote_threads_for_anchor(
 /// Render a single expanded context line (shared by unified + side-by-side via unified path)
 #[allow(clippy::too_many_arguments)]
 fn render_expanded_context_line(
-    lines: &mut Vec<Line<'_>>,
+    lines: &mut DiffRows<'_>,
     content_rows: &mut HashSet<usize>,
     line_idx: &mut usize,
     current_line_idx: usize,

@@ -2232,7 +2232,7 @@ fn should_leave_locked_review_comments_out_of_the_body() {
     let live_id = live.id.clone();
     app.session.review_comments.push(live);
     // when the body is built
-    let (body, ids) = app.build_submit_body(&[]);
+    let (body, ids) = app.build_submit_body(&[], None);
     // then only the live one is in it
     assert!(body.contains("STILL-LOCAL"), "{body}");
     assert!(!body.contains("ALREADY-POSTED"), "{body}");

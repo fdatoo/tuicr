@@ -1,28 +1,63 @@
 use super::*;
+use crate::forge::submit::SubmitEvent;
 use crate::forge::traits::SubmitReceipts;
 
+#[derive(Debug, Clone)]
+pub(crate) struct GuideSubmission {
+    diff: String,
+    pub(crate) note: Option<String>,
+    pub(crate) unverified_risks: usize,
+    editing_note: bool,
+}
+
+#[derive(Clone, Copy)]
+enum GuidedChoice {
+    Post { event: SubmitEvent, note: bool },
+    Split,
+    ComeBack,
+}
+
+const GUIDED_CHOICES: &[(&str, GuidedChoice)] = &[
+    (
+        "Approve what I verified",
+        GuidedChoice::Post {
+            event: SubmitEvent::Approve,
+            note: true,
+        },
+    ),
+    (
+        "Approve",
+        GuidedChoice::Post {
+            event: SubmitEvent::Approve,
+            note: false,
+        },
+    ),
+    (
+        "Request changes",
+        GuidedChoice::Post {
+            event: SubmitEvent::RequestChanges,
+            note: true,
+        },
+    ),
+    (
+        "Comment",
+        GuidedChoice::Post {
+            event: SubmitEvent::Comment,
+            note: true,
+        },
+    ),
+    ("Ask the author to split", GuidedChoice::Split),
+    ("Save and come back", GuidedChoice::ComeBack),
+];
+
 impl App {
-    /// Drive `:submit*` preflight: walk every local-draft comment in the
-    /// current PR session, map each one against the displayed diff, bucket
-    /// the results, and transition into the resolver (when there are
-    /// unmappable comments) or the final-confirmation modal.
-    ///
-    /// PR 5 does not call the network; `[y]` in the confirmation modal
-    /// stubs a "PR 6 will wire the network call" info message.
-    pub fn start_submit(&mut self, event: crate::forge::submit::SubmitEvent) {
-        self.start_submit_with(event, false);
+    /// Explicit `:submit <event>` uses the confirmation modal as before.
+    pub fn start_submit(&mut self, event: SubmitEvent) {
+        let include_note = matches!(event, SubmitEvent::Comment | SubmitEvent::RequestChanges);
+        self.start_submit_with(event, false, include_note);
     }
 
-    /// Like `start_submit`, but when `skip_confirm` is `true` the flow
-    /// bypasses `SubmitConfirm`. The action-picker path uses this because
-    /// picking IS the confirmation; the resolver (if any unmappable
-    /// comments) still runs first, then dispatches the network call
-    /// directly. `:submit <event>` callers should pass `false`.
-    pub fn start_submit_with(
-        &mut self,
-        event: crate::forge::submit::SubmitEvent,
-        skip_confirm: bool,
-    ) {
+    fn start_submit_with(&mut self, event: SubmitEvent, skip_confirm: bool, include_note: bool) {
         use crate::forge::submit::{
             CommentAnchor, InlineComment, ResolverAction, SubmitContext, UnmappableItem,
             UnmappableReason, map_comment,
@@ -37,6 +72,18 @@ impl App {
             self.set_warning(format!("Cannot submit: PR is {reason}"));
             return;
         }
+        let guide = self.coverage_record().map(|coverage| GuideSubmission {
+            diff: self.review_digest(),
+            note: include_note.then(|| coverage.note()),
+            unverified_risks: coverage.approval_risk_count(event),
+            editing_note: false,
+        });
+        let has_note = guide.as_ref().is_some_and(|guide| guide.note.is_some());
+        let skip_confirm = skip_confirm
+            && !has_note
+            && guide
+                .as_ref()
+                .is_none_or(|guide| guide.unverified_risks == 0);
         // When the inline commit selector shows a strict subset, comments
         // anchor to the displayed (subset) diff, so `commit_id` must be the
         // SHA the diff was computed against — otherwise GitHub rejects with
@@ -149,28 +196,11 @@ impl App {
             }
         }
 
-        // Approve is the one event that's meaningful with no comments — a
-        // bare "LGTM" approval. Every other event needs at least one local
-        // draft comment or a review-level comment, otherwise there's
-        // nothing to submit.
-        // A request-changes vote can also go out bare on forges that cast it
-        // as its own call after the comments: a partial submit locks the
-        // comments that landed, and the retry must still be able to vote.
-        // GitHub rejects an empty request-changes review, so it is excluded.
-        let bare_allowed = match event {
-            crate::forge::submit::SubmitEvent::Approve => true,
-            crate::forge::submit::SubmitEvent::RequestChanges => {
-                self.forge_kind().is_some_and(|kind| {
-                    use crate::forge::traits::ForgeKind;
-                    matches!(
-                        kind,
-                        ForgeKind::GitLab | ForgeKind::Bitbucket | ForgeKind::AzureDevOps
-                    )
-                })
-            }
-            _ => false,
-        };
+        // GitHub rejects an empty request-changes review. The other voting
+        // backends below can retry a bare vote after a partial submit.
+        let bare_allowed = self.submit_allows_empty(event);
         if !bare_allowed
+            && !has_note
             && total_local_drafts == 0
             && !self.session.review_comments.iter().any(|c| !c.is_locked())
         {
@@ -189,6 +219,7 @@ impl App {
             commit_id,
             base_commit_id,
             skip_confirm,
+            guide,
         });
 
         if has_unmappable {
@@ -201,22 +232,22 @@ impl App {
         }
     }
 
-    /// Open the bare-`:submit` action picker. The user picks
-    /// Comment/Approve/Request changes/Draft (or cancels); the picked event
-    /// then runs through preflight with `skip_confirm = true` so no extra
-    /// confirmation modal follows.
+    /// Bare `:submit`: use scoped choices when the current review has a guide.
     pub fn start_submit_action_picker(&mut self) {
         if !matches!(self.diff_source, DiffSource::PullRequest(_)) {
             self.set_warning(":submit only applies in PR mode");
             return;
         }
-        self.submit_picker_cursor = 0;
+        self.submit_picker_cursor = usize::from(
+            self.coverage_record()
+                .is_some_and(|coverage| coverage.complete()),
+        );
         self.input_mode = InputMode::SubmitActionPicker;
     }
 
     /// Move the action-picker cursor down by one row, wrapping at the end.
     pub fn submit_picker_cursor_down(&mut self) {
-        let total = SUBMIT_PICKER_EVENTS.len();
+        let total = self.submit_picker_len();
         if total > 0 {
             self.submit_picker_cursor = (self.submit_picker_cursor + 1) % total;
         }
@@ -224,15 +255,44 @@ impl App {
 
     /// Move the action-picker cursor up by one row, wrapping at the start.
     pub fn submit_picker_cursor_up(&mut self) {
-        let total = SUBMIT_PICKER_EVENTS.len();
+        let total = self.submit_picker_len();
         if total > 0 {
             self.submit_picker_cursor = (self.submit_picker_cursor + total - 1) % total;
         }
     }
 
-    /// Confirm the action picker selection: dispatch into preflight with the
-    /// chosen event and `skip_confirm = true`.
+    fn submit_picker_len(&self) -> usize {
+        if self.installed_guide().is_some() {
+            GUIDED_CHOICES.len()
+        } else {
+            SUBMIT_PICKER_EVENTS.len()
+        }
+    }
+
+    pub(crate) fn submit_picker_label(&self, index: usize) -> Option<&'static str> {
+        if self.installed_guide().is_some() {
+            GUIDED_CHOICES.get(index).map(|(label, _)| *label)
+        } else {
+            SUBMIT_PICKER_EVENTS.get(index).map(|(label, _)| *label)
+        }
+    }
+
     pub fn submit_picker_confirm(&mut self) {
+        if self.installed_guide().is_some() {
+            let choice = GUIDED_CHOICES
+                .get(self.submit_picker_cursor)
+                .map(|(_, choice)| *choice);
+            self.cancel_submit_action_picker();
+            match choice {
+                Some(GuidedChoice::Post { event, note }) => {
+                    self.start_submit_with(event, true, note)
+                }
+                Some(GuidedChoice::Split) => self.draft_split_request(),
+                Some(GuidedChoice::ComeBack) => self.write_current_review(),
+                None => {}
+            }
+            return;
+        }
         let Some(event) = SUBMIT_PICKER_EVENTS
             .get(self.submit_picker_cursor)
             .map(|(_, ev)| *ev)
@@ -241,7 +301,88 @@ impl App {
             return;
         };
         self.input_mode = InputMode::Normal;
-        self.start_submit_with(event, true);
+        self.start_submit_with(event, true, false);
+    }
+
+    fn draft_split_request(&mut self) {
+        use std::fmt::Write as _;
+
+        let Some(guide) = self.installed_guide() else {
+            return;
+        };
+        let mut draft =
+            String::from("Could you split this change into smaller reviews along these stories?\n");
+        for story in &guide.stories {
+            let _ = write!(draft, "\n- {}", story.title);
+        }
+        self.enter_review_comment_mode();
+        self.comment_cursor = draft.len();
+        self.comment_buffer = draft;
+    }
+
+    pub(crate) fn submit_unverified_risks(&self) -> usize {
+        self.submit_state
+            .as_ref()
+            .and_then(|state| state.guide.as_ref())
+            .map_or(0, |guide| guide.unverified_risks)
+    }
+
+    pub(crate) fn edit_coverage_note(&mut self) {
+        let Some(guide) = self
+            .submit_state
+            .as_mut()
+            .and_then(|state| state.guide.as_mut())
+        else {
+            return;
+        };
+        let Some(note) = guide.note.clone() else {
+            return;
+        };
+        guide.editing_note = true;
+        self.enter_review_comment_mode();
+        self.comment_cursor = note.len();
+        self.comment_buffer = note;
+    }
+
+    pub(crate) fn editing_coverage_note(&self) -> bool {
+        self.submit_state
+            .as_ref()
+            .and_then(|state| state.guide.as_ref())
+            .is_some_and(|guide| guide.editing_note)
+    }
+
+    pub(super) fn finish_coverage_note_edit(&mut self) -> bool {
+        let Some(guide) = self
+            .submit_state
+            .as_mut()
+            .and_then(|state| state.guide.as_mut())
+        else {
+            return false;
+        };
+        std::mem::take(&mut guide.editing_note)
+    }
+
+    pub(super) fn save_coverage_note_edit(&mut self) {
+        if let Some(guide) = self
+            .submit_state
+            .as_mut()
+            .and_then(|state| state.guide.as_mut())
+        {
+            guide.note = Some(self.comment_buffer.trim().to_owned());
+        }
+        self.exit_comment_mode();
+    }
+
+    fn submit_allows_empty(&self, event: SubmitEvent) -> bool {
+        event == SubmitEvent::Approve
+            || (event == SubmitEvent::RequestChanges
+                && self.forge_kind().is_some_and(|kind| {
+                    use crate::forge::traits::ForgeKind;
+                    matches!(
+                        kind,
+                        ForgeKind::GitLab | ForgeKind::Bitbucket | ForgeKind::AzureDevOps
+                    )
+                }))
     }
 
     /// Cancel the action picker without entering preflight.
@@ -319,6 +460,23 @@ impl App {
     /// status-bar spinner takes over until the result lands in
     /// `poll_pr_submit_events`.
     pub fn confirm_submit(&mut self) {
+        if let Some(state) = self.submit_state.as_ref()
+            && let Some(guide) = state.guide.as_ref()
+            && guide.note.as_deref() == Some("")
+            && !self.submit_allows_empty(state.event)
+            && state.mappable.is_empty()
+            && !state
+                .resolver_choices
+                .contains(&crate::forge::submit::ResolverAction::MoveToSummary)
+            && !self
+                .session
+                .review_comments
+                .iter()
+                .any(|comment| !comment.is_locked())
+        {
+            self.set_warning("Nothing to submit — add a comment or keep the coverage note");
+            return;
+        }
         if let Err(e) = self.spawn_pr_submit() {
             self.set_error(format!("Submit failed: {e}"));
             self.submit_state = None;
@@ -348,6 +506,15 @@ impl App {
         let Some(state) = self.submit_state.take() else {
             return Ok(());
         };
+        if state
+            .guide
+            .as_ref()
+            .is_some_and(|guide| guide.diff != self.review_digest())
+        {
+            return Err(TuicrError::InvalidInput(
+                "Review diff changed — reopen :submit".into(),
+            ));
+        }
 
         let summary_items: Vec<MovedToSummaryItem> = state
             .unmappable
@@ -366,7 +533,8 @@ impl App {
             .collect();
         let summary_comment_ids: Vec<String> =
             summary_items.iter().map(|i| i.comment.id.clone()).collect();
-        let (body, review_comment_ids) = self.build_submit_body(&summary_items);
+        let note = state.guide.as_ref().and_then(|guide| guide.note.as_deref());
+        let (body, review_comment_ids) = self.build_submit_body(&summary_items, note);
 
         // Save the session BEFORE the network call — keeps the user's
         // local-draft work durable if anything goes sideways below.
@@ -455,6 +623,7 @@ impl App {
     pub(super) fn build_submit_body(
         &self,
         summary_items: &[crate::forge::submit::MovedToSummaryItem],
+        coverage_note: Option<&str>,
     ) -> (String, Vec<String>) {
         let unlocked: Vec<_> = self
             .session
@@ -467,6 +636,7 @@ impl App {
         let body = crate::forge::submit::build_review_body(
             &unlocked,
             summary_items,
+            coverage_note,
             crate::forge::submit::SubmitContext::new(&self.forge_config, &self.comment_types),
         );
         (body, ids)

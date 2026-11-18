@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -e -u -o pipefail
 
+# shellcheck source=_tuicr-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_tuicr-common.sh"
 
 # Configuration - override via environment variables
@@ -55,7 +56,7 @@ EOF
 }
 
 check_zellij() {
-  if [[ ! -x "$ZELLIJ_BIN" ]] && ! command -v zellij &> /dev/null; then
+  if ! command -v "$ZELLIJ_BIN" &> /dev/null; then
     log_error "zellij command not found on PATH"
     return 1
   fi
@@ -90,13 +91,15 @@ check_repo() {
 # That is not this shell — an agent calls the wrapper several processes deep —
 # so walk up to the pane's own process and try each ancestor.
 caller_pane_is_floating() {
-  local layout pid cmd
+  local layout pid cmd process
   layout=$("$ZELLIJ_BIN" action dump-layout 2>/dev/null) || return 1
 
   pid=$$
   while [[ -n "$pid" && "$pid" != "1" ]]; do
-    cmd=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | head -1)
-    if [[ -n "$cmd" && "$cmd" != "bash" && "$cmd" != "sh" ]]; then
+    process=$(ps -ww -p "$pid" -o ppid= -o comm= 2>/dev/null) || break
+    read -r pid cmd <<< "$process"
+    cmd=${cmd##*/}
+    if [[ -n "$cmd" && "$cmd" != "bash" && "$cmd" != "sh" && "$cmd" != "zsh" ]]; then
       if printf '%s\n' "$layout" | awk -v needle="$cmd" '
            # Only the focused tab: a floating pane in some other tab says
            # nothing about where this one is.
@@ -109,7 +112,6 @@ caller_pane_is_floating() {
         return 0
       fi
     fi
-    pid=$(awk '{print $4}' "/proc/$pid/stat" 2>/dev/null)
   done
   return 1
 }
@@ -121,7 +123,10 @@ check_tuicr_running() {
   local target="$1"
   local pid cwd
   for pid in $(pgrep -x tuicr 2>/dev/null); do
-    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue
+    # macOS has no procfs; lsof reports the process's cwd without
+    # splitting paths on whitespace.
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null ||
+      lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | awk '/^n/ { print substr($0, 2) }') || continue
     if [[ "$cwd" == "$target" || "$cwd" == "$target"/* ]]; then
       return 0
     fi
@@ -152,17 +157,13 @@ launch_tuicr_pane() {
   mkfifo "$fifo"
 
   # Optional --stdout capture
-  local output_file=""
-  local tuicr_cmd="$(command -v tuicr)$(tuicr_quote_args "${tuicr_args[@]+"${tuicr_args[@]}"}")"
-  local use_stdout=false
+  local output_file="" tuicr_cmd
+  tuicr_cmd=$(tuicr_quote_args "$(command -v tuicr)" "${tuicr_args[@]+"${tuicr_args[@]}"}")
 
   if tuicr_stdout_supported; then
     output_file=$(mktemp /tmp/tuicr-output.XXXXXX)
     tuicr_cmd="$tuicr_cmd --stdout > '$output_file'"
-    use_stdout=true
     log_info "Using --stdout mode (output will be captured)"
-  else
-    log_warn "tuicr --stdout not supported, output will be copied to clipboard"
   fi
 
   # Spawn tuicr in a new zellij pane. --close-on-exit cleans up the pane when
@@ -170,7 +171,7 @@ launch_tuicr_pane() {
   # Without --near-current-pane zellij opens beside whatever is FOCUSED, which
   # is the tab the human is looking at rather than the pane this wrapper runs
   # in — an agent's review lands in someone else's tab.
-  zellij_args=("--close-on-exit" "--near-current-pane" "--name" "tuicr")
+  local zellij_args=("--close-on-exit" "--near-current-pane" "--name" "tuicr" "--cwd" "$target_dir")
 
   # A stack is only visible from a tiled pane. Called from a floating overlay,
   # a stacked pane is hidden behind whatever is already stacked there, so the
@@ -205,7 +206,7 @@ launch_tuicr_pane() {
 
   log_info "tuicr finished"
 
-  tuicr_report_stdout_output "$use_stdout" "$output_file"
+  tuicr_report_stdout_output "$output_file" "$target_dir"
 }
 
 main() {
@@ -223,7 +224,7 @@ main() {
   # Determine target directory, then split off any pass-through tuicr args
   tuicr_parse_args "$@"
   local target_dir="$TUICR_TARGET_DIR"
-  target_dir=$(cd "$target_dir" && pwd)  # Get absolute path
+  target_dir=$(cd "$target_dir" && pwd -P)
 
   # Verify it's a git or jj repo
   if ! check_repo "$target_dir"; then

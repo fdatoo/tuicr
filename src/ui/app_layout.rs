@@ -9,6 +9,9 @@ use crate::ui::comment_navigator::render_comment_navigator;
 use crate::ui::diff_view::render_diff_view;
 use crate::ui::file_list::render_file_list;
 use crate::ui::inline_commit_selector::render_inline_commit_selector;
+use crate::ui::review_map::{
+    paint_guide_spotlight, render_guide_details, render_map, render_stop_card,
+};
 use crate::ui::selector::render_commit_select;
 use crate::ui::{
     comment_panel, file_picker, help_popup, status_bar, styles, submit_modals, summary_popup,
@@ -20,6 +23,12 @@ const COMMENT_NAVIGATOR_MIN_HEIGHT: u16 = 4;
 const COMMENT_NAVIGATOR_MAX_HEIGHT: u16 = 12;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
+    app.companion.area = None;
+    if app.input_mode == InputMode::Coverage {
+        crate::ui::coverage::render(frame, app);
+        return;
+    }
+
     // Color what this frame shows before any line is built; see
     // `App::color_visible_hunks`.
     app.color_visible_hunks(frame.area().height as usize);
@@ -33,17 +42,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         help_popup::render_message_details(frame, app);
         return;
     }
+    if app.input_mode == InputMode::GuideDetails {
+        render_guide_details(frame, app);
+        return;
+    }
 
-    let selector_background = app.input_mode == InputMode::CommitSelect
-        || (app.input_mode == InputMode::Confirm
-            && app.pending_confirm.map(ConfirmAction::return_mode)
-                == Some(InputMode::CommitSelect))
-        || (app.input_mode == InputMode::Command
-            && app.command_return_mode == InputMode::CommitSelect)
-        || (app.input_mode == InputMode::Help
-            && app.overlay_return_mode == InputMode::CommitSelect)
-        || (app.searching_help() && app.overlay_return_mode == InputMode::CommitSelect);
-    if selector_background {
+    if app.showing_target_selector() {
         render_commit_select(frame, app);
         let area = frame.area();
         let footer = Rect::new(
@@ -79,6 +83,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     status_bar::render_header(frame, app, chunks[0]);
     render_main_content(frame, app, chunks[1]);
+    app.clear_guide_verdict_hint_if_left();
     status_bar::render_status_bar(frame, app, chunks[2]);
     status_bar::render_command_completion_popup(frame, app, chunks[2]);
 
@@ -130,7 +135,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
 fn render_main_content(frame: &mut Frame, app: &mut App, area: Rect) {
     let content_area = if app.input_mode != InputMode::Summary && app.has_inline_commit_selector() {
-        let selector_height = (app.review_commits.len() as u16 + 2).min(8); // N items + 2 borders, capped
+        let mut selector_height = (app.review_commits.len() as u16 + 2).min(8);
+        if app.input_mode == InputMode::Companion {
+            let reserve = app.companion_diff_reserve().saturating_add(5);
+            selector_height = selector_height.min(area.height.saturating_sub(reserve));
+        }
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(selector_height), Constraint::Min(0)])
@@ -141,71 +150,174 @@ fn render_main_content(frame: &mut Frame, app: &mut App, area: Rect) {
         app.commit_list_inner_area = None;
         area
     };
+    // Let a short guide card wrap across the whole terminal while Ask is
+    // docked. The sidebar still gets its own rows beside the code and dock.
+    let wide_card = app.input_mode == InputMode::Companion
+        && app.current_stop().is_some()
+        && content_area.width <= 80
+        && content_area.height <= 16;
+    let content_area = if wide_card {
+        let minimum = 4 + u16::from(app.diff_state.wrap_lines);
+        render_stop_card(
+            frame,
+            app,
+            content_area,
+            content_area.height.saturating_sub(minimum),
+            0,
+        )
+    } else {
+        content_area
+    };
 
     if app.show_file_list {
-        const SIDEBAR: Constraint = Constraint::Percentage(20);
-        const DIFF: Constraint = Constraint::Percentage(80);
+        let (sidebar, diff) = if app.showing_review_map() && content_area.width >= 55 {
+            let width = (23 + content_area.width.saturating_sub(80) / 2).min(40);
+            (Constraint::Length(width), Constraint::Min(0))
+        } else {
+            (Constraint::Percentage(20), Constraint::Percentage(80))
+        };
         let (sidebar_area, diff_area) = match app.file_list_position {
             FileListPosition::Left => {
                 let chunks = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([SIDEBAR, DIFF])
+                    .constraints([sidebar, diff])
                     .split(content_area);
                 (chunks[0], chunks[1])
             }
             FileListPosition::Right => {
                 let chunks = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([DIFF, SIDEBAR])
+                    .constraints([diff, sidebar])
                     .split(content_area);
                 (chunks[1], chunks[0])
             }
         };
 
-        let comment_items = app.build_comment_navigator_items();
-        if !comment_items.is_empty()
-            && sidebar_area.height >= FILE_LIST_MIN_HEIGHT + COMMENT_NAVIGATOR_MIN_HEIGHT
-        {
-            let available_comment_height = sidebar_area.height.saturating_sub(FILE_LIST_MIN_HEIGHT);
+        let sidebar_min_height = if app.showing_review_map() {
+            9
+        } else {
+            FILE_LIST_MIN_HEIGHT
+        };
+        let comment_count =
+            if sidebar_area.height >= sidebar_min_height + COMMENT_NAVIGATOR_MIN_HEIGHT {
+                app.comment_navigator_items().len()
+            } else {
+                0
+            };
+        if comment_count > 0 {
+            let available_comment_height = sidebar_area.height.saturating_sub(sidebar_min_height);
             let max_comment_height = COMMENT_NAVIGATOR_MAX_HEIGHT.min(available_comment_height);
-            let desired_comment_height = comment_items.len() as u16 + 2;
+            let desired_comment_height = u16::try_from(comment_count)
+                .unwrap_or(u16::MAX)
+                .saturating_add(2);
             let comment_height = desired_comment_height
                 .min(max_comment_height)
                 .max(COMMENT_NAVIGATOR_MIN_HEIGHT);
             let sidebar_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Min(FILE_LIST_MIN_HEIGHT),
+                    Constraint::Min(sidebar_min_height),
                     Constraint::Length(comment_height),
                 ])
                 .split(sidebar_area);
 
             app.file_list_area = Some(sidebar_chunks[0]);
             app.comment_navigator_area = Some(sidebar_chunks[1]);
-            render_file_list(frame, app, sidebar_chunks[0]);
-            render_comment_navigator(frame, app, sidebar_chunks[1], &comment_items);
+            render_sidebar(frame, app, sidebar_chunks[0]);
+            render_comment_navigator(frame, app, sidebar_chunks[1]);
         } else {
             app.file_list_area = Some(sidebar_area);
             app.comment_navigator_area = None;
             app.comment_navigator_inner_area = None;
-            render_file_list(frame, app, sidebar_area);
+            render_sidebar(frame, app, sidebar_area);
         }
-        render_content_view(frame, app, diff_area);
+        render_content_view(frame, app, diff_area, wide_card);
     } else {
         app.file_list_area = None;
+        app.set_guide_map_viewport(None, Vec::new());
         app.file_list_inner_area = None;
         app.comment_navigator_area = None;
         app.comment_navigator_inner_area = None;
-        render_content_view(frame, app, content_area);
+        render_content_view(frame, app, content_area, wide_card);
     }
 }
 
-fn render_content_view(frame: &mut Frame, app: &mut App, area: Rect) {
-    app.diff_area = Some(area);
+fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.showing_review_map() {
+        app.file_list_inner_area = None;
+        render_map(frame, app, area);
+    } else {
+        app.set_guide_map_viewport(None, Vec::new());
+        render_file_list(frame, app, area);
+    }
+}
+
+fn render_content_view(frame: &mut Frame, app: &mut App, area: Rect, card_drawn: bool) {
     if app.input_mode == InputMode::Summary {
+        app.diff_area = Some(area);
         summary_popup::render_summary(frame, app, area);
     } else {
-        render_diff_view(frame, app, area);
+        let (remaining, dock_height) = if app.current_stop().is_some() {
+            let preferred = app.companion_preferred_height(area.height);
+            let border = if app.is_diff_sole_pane() { 0 } else { 2 };
+            let width = area.width.saturating_sub(border);
+            let code = app.guide_preview_height(usize::from(width), area.height);
+            let minimum_diff = code.clamp(1, 2);
+            let preview = code.saturating_add(border).max(minimum_diff);
+            let remaining = if card_drawn {
+                area
+            } else {
+                let essential = area.height.saturating_sub(minimum_diff + preferred.min(5));
+                let optional = area
+                    .height
+                    .saturating_sub(preview.saturating_add(preferred))
+                    .min(area.height.div_ceil(4).max(5));
+                render_stop_card(frame, app, area, essential, optional)
+            };
+            let first = if preferred > 0 && app.guide_cursor_in_stop() {
+                // A tight viewport may drop the frame to keep this row visible.
+                app.guide_first_row_height(usize::from(remaining.width))
+            } else {
+                minimum_diff
+            };
+            let dock = crate::app::companion::fit_companion_height(
+                remaining.height,
+                preferred,
+                first,
+                preview,
+            );
+            (remaining, dock)
+        } else {
+            let dock = app.companion_height(area.height);
+            let height = area.height - dock;
+            let diff = Rect::new(area.x, area.y, area.width, height);
+            let rest = render_stop_card(frame, app, diff, height.saturating_sub(4), 0);
+            (
+                Rect::new(rest.x, rest.y, rest.width, rest.height + dock),
+                dock,
+            )
+        };
+        let diff_height = remaining.height - dock_height;
+        let diff = Rect::new(remaining.x, remaining.y, remaining.width, diff_height);
+        let dock = Rect::new(
+            remaining.x,
+            remaining.y + diff_height,
+            remaining.width,
+            dock_height,
+        );
+        app.diff_area = Some(diff);
+        if !diff.is_empty() {
+            render_diff_view(frame, app, diff);
+            paint_guide_spotlight(frame, app);
+        } else {
+            app.diff_inner_area = None;
+            app.diff_row_to_annotation.clear();
+            app.diff_state.viewport_height = 0;
+        }
+        if !dock.is_empty() {
+            app.companion.area = Some(dock);
+            crate::ui::companion::render(frame, app, dock);
+        }
     }
 }
 

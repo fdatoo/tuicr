@@ -5,6 +5,7 @@
 # wrapper shares. Sets TUICR_TARGET_DIR and the TUICR_PASSTHROUGH_ARGS array
 # instead of returning them, since a sourced function's positional
 # parameters are its own and can't shift the caller's.
+# shellcheck disable=SC2034 # These variables are read by the sourcing wrappers.
 tuicr_parse_args() {
   TUICR_TARGET_DIR="."
   if [[ "${1:-}" != "--" && -n "${1:-}" ]]; then
@@ -56,25 +57,24 @@ tuicr_wait_for_running() {
   log_info "The other tuicr closed; launching this review"
 }
 
-# Prints the review exported via --stdout, or points the caller at the
-# clipboard when --stdout capture wasn't used. Cleans up output_file either
-# way. Callers must define log_info before invoking this.
-tuicr_report_stdout_output() {
-  local use_stdout="$1"
-  local output_file="$2"
+tuicr_report_saved_comments() {
+  log_info "Read saved feedback with: tuicr review comments$(tuicr_quote_args --repo "$1" --session SLUG)"
+}
 
-  if [[ "$use_stdout" == true ]] && [[ -f "$output_file" ]]; then
-    if [[ -s "$output_file" ]]; then
-      echo ""
-      echo "=== TUICR INSTRUCTIONS ==="
-      cat "$output_file"
-      echo "=== END TUICR INSTRUCTIONS ==="
-    else
-      log_info "No instructions exported from tuicr"
-      log_info "If you exported to clipboard, paste the instructions here"
-    fi
-    rm -f "$output_file"
+# Print an explicit export if there was one. A plain :q leaves saved comments
+# in the session, even though it does not export anything.
+tuicr_report_stdout_output() {
+  local output_file="$1"
+  local target_dir="$2"
+  if [[ -s "$output_file" ]]; then
+    echo ""
+    echo "=== TUICR INSTRUCTIONS ==="
+    cat "$output_file"
+    echo "=== END TUICR INSTRUCTIONS ==="
   else
-    log_info "If you exported instructions, they are in your clipboard - paste them here"
+    tuicr_report_saved_comments "$target_dir"
+  fi
+  if [[ -n "$output_file" ]]; then
+    rm -f "$output_file"
   fi
 }

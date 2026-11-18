@@ -21,6 +21,71 @@
 - Works with git, jj, and mercurial. Reviews uncommitted changes, commit ranges, or any GitHub PR,
   GitLab MR, Gitea PR, Bitbucket PR, Azure DevOps PR, or Gerrit change.
 
+### Guided review in this fork
+
+Build and install this checkout with `cargo install --path . --locked`. The
+packaged installs below and `tuicr update` target upstream tuicr.
+
+1. **Prepare.** Open a PR to start preparation by default, or press `p` on
+   its row in Pull Requests to start without opening it (`P` cancels). For
+   local changes, open `tuicr -w` and run `:prepare`, or prepare ahead of time
+   with `tuicr prepare -w`. The reviewing agent writes a guide, then tries to
+   refute its claims and find covering tests. It reads evidence; it does not
+   run the reviewed code or tests. If the author supplied a guide, use
+   `tuicr prepare -w --guide PATH --wait` to audit it instead.
+2. **Open.** Open the same target. Sessions also lists preparing and ready
+   guides. The **Review ready** line gives the stop count and, when available,
+   an estimate for the stops, not the whole diff. The cursor stays put. Press
+   `.` or run `:guide` to start or resume. To use an unaudited author guide
+   without an AI client, launch with `tuicr -w --guide PATH`.
+3. **Walk the stops.** The map groups related stops into stories, with
+   supporting changes separate. Each stop marks a block in the gutter, mutes
+   the surrounding diff, and states a claim to check. Press `.` to record
+   Checks out and move on; use `K` to explicitly check out a risky, untested,
+   or doubtful stop. `x` opens a range comment and records Wrong only when
+   you save it. `p` parks the stop,
+   `,` goes back, `'` returns after a detour, and `t` switches the map and
+   file tree. Verdicts persist across restarts.
+   If the card is clipped, run `:guide detail` to read the full stop.
+4. **Ask.** Press `a` on a stop, diff line, selection or comment. Ask opens
+   below the code. On a guide stop, `Enter` with no typed question answers
+   the highlighted prepared follow-up without a provider call. Type a new
+   question and press `Enter` to send it instead. The answer streams and is
+   saved in full, but initially shows at most three sentences. `Ctrl-o`
+   reveals any hidden text or asks the provider for more. `Ctrl-x` cancels
+   and restores submitted text. A provider that goes quiet for about 45
+   seconds fails without an automatic retry; only empty or unusable answers
+   are retried once. Only feedback you save as a comment is shared.
+5. **Spot-check.** Run `:spot` to review up to five supporting hunks. Use
+   `:coverage` to see what you verified, parked, dismissed or left unchecked.
+6. **Submit.** In a PR, `:submit` offers an approval with a coverage note,
+   an ordinary approval without one, a comment, or a request for changes.
+   You can also draft a request to split the PR or save and come back. Preview
+   and edit the note before it is sent. Approving with unverified risk items
+   requires explicit confirmation.
+
+After an author responds in a local review, reload with `:e` and run
+`:changes` to walk the new edits. This compares with the review's original
+baseline, not HEAD, and does not contact an AI provider.
+
+**What goes to the AI provider.** Preparation sends the diff and review context
+(including the PR description and CI results already available to tuicr, or
+local commit messages), reviewer rules, and any supplied or relevant previous
+guide. This starts only when you open the PR with automatic preparation on or
+explicitly start preparation, never while merely browsing the PR list. Ask sends
+the question, relevant thread history and code context when you request an AI
+answer or feedback draft. These calls need an authenticated `claude` (default)
+or `codex` executable on `PATH`. Claude can read and search a read-only snapshot
+of the review revision when available; Codex has no file tools and prepares from
+the bounded diff and changed-file excerpts only. Do not use the provider on
+material you are not allowed to send. Background preparation requires Unix
+(including macOS and Linux). Set `prepare_on_open = false` to review PRs
+without automatic AI preparation.
+
+See [review controls](docs/KEYBINDINGS.md#review-guide),
+[guide authoring](docs/CLI.md#authoring-a-review-guide) and
+[AI settings](docs/CONFIG.md#reviewer-rules).
+
 ## Install
 
 ```bash
@@ -225,7 +290,8 @@ Herdr split pane, see [skills/tuicr/SKILL.md](skills/tuicr/SKILL.md).
 
 ### To stdout
 
-Run with `--stdout` to pipe the markdown to another process:
+Run with `--stdout`, then press `y` or run `:clip` to export and exit.
+Plain `:q` does not export.
 
 ```bash
 tuicr --stdout > review.md
@@ -313,18 +379,20 @@ programs.tuicr = {
 };
 ```
 
-Bundled themes: `dark`, `light`, `ayu-light`, `ayu-mirage`, `onedark`, `github-light`,
-`github-dark`, `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`,
-`catppuccin-mocha`, `everforest-dark`, `everforest-light`, `gruvbox-dark`,
-`gruvbox-light`, `nord-dark`, `nord-light`, `nord-dark-high-contrast`,
-`nord-light-high-contrast`, `solarized-light`, `solarized-dark`, `tokyo-night-storm`,
-`tokyo-night-day`.
+Bundled themes: `dark`, `light`, `ayu-light`, `ayu-mirage`, `onedark`,
+`github-light`, `github-dark`, `github-dark-colorblind`, `catppuccin-latte`,
+`catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`, `everforest-dark`,
+`everforest-light`, `gruvbox-dark`, `gruvbox-light`, `nord-dark`, `nord-light`,
+`nord-dark-high-contrast`, `nord-light-high-contrast`, `solarized-light`,
+`solarized-dark`, `tokyo-night-storm`, `tokyo-night-day`.
 
 Local themes: set `theme = "my-theme"` or run `tuicr --theme my-theme`, then create
 `~/.config/tuicr/themes/my-theme.toml` on Linux/macOS or `%APPDATA%\tuicr\themes\my-theme.toml`
 on Windows. Local themes may reference a local `syntax_theme = "my-syntax.tmTheme"` file for
 syntax highlighting. A ready-to-copy example lives at [`examples/tuicr-teal.toml`](examples/tuicr-teal.toml)
 with its matching [`examples/tuicr-teal-syntax.tmTheme`](examples/tuicr-teal-syntax.tmTheme) syntax theme.
+An invalid `--theme` exits with code `2`. An invalid configured theme warns
+on startup and falls back to the next valid choice.
 
 Full options, theme resolution precedence, `comment_types` semantics, and `.tuicrignore` rules in
 [docs/CONFIG.md](docs/CONFIG.md).

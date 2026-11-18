@@ -248,6 +248,7 @@ PR slug:
     "author": "alice",
     "lifecycle_state": "local_draft",
     "created_at": "2026-05-22T17:20:00Z",
+    "stale": false,
     "content": "Handle the empty case here."
   }
 ]
@@ -255,3 +256,19 @@ PR slug:
 
 The `author` field is the username stored with the comment. It is present in
 the JSON emitted by both `review add` and `review comments`.
+
+`comments` reports saved review comments, including saved feedback from Ask.
+Private questions, answers and unsaved feedback drafts are never included.
+Review guide verdicts are separate; they do not appear in the comment list.
+A Wrong verdict's saved range comment appears like any other saved comment.
+
+### Stale anchors after local edits
+
+When a local review reloads or reopens, saved line and range drafts follow
+their original code if it can be found unambiguously in the same file and
+side. If the code cannot be matched, `stale` is `true` and `original_text`
+contains the originally commented source lines as an array of strings.
+The reported line is the last known location, not proof that the comment
+applies to the code now there. The Markdown export includes a stale marker
+and those original lines too. Locked comments and older comments without
+recorded text are not relocated.

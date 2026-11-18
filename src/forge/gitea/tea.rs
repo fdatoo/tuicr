@@ -227,21 +227,28 @@ fn tea_logins() -> &'static [TeaLoginHost] {
         else {
             return Vec::new();
         };
-        let Ok(logins) = serde_json::from_str::<Vec<TeaLogin>>(&output) else {
-            return Vec::new();
-        };
-        logins
-            .into_iter()
-            .filter_map(|login| {
-                let host = host_of_url(&login.url)?;
-                (!login.name.is_empty()).then_some(TeaLoginHost {
-                    host,
-                    is_default: login.is_default(),
-                    name: login.name,
-                })
-            })
-            .collect()
+        read_tea_logins(output.as_bytes(), host_of_url)
     })
+}
+
+fn read_tea_logins(
+    output: &[u8],
+    resolve_host: impl Fn(&str) -> Option<String>,
+) -> Vec<TeaLoginHost> {
+    let Ok(logins) = serde_json::from_slice::<Vec<TeaLogin>>(output) else {
+        return Vec::new();
+    };
+    logins
+        .into_iter()
+        .filter_map(|login| {
+            let host = resolve_host(&login.url)?;
+            (!login.name.is_empty()).then_some(TeaLoginHost {
+                host,
+                is_default: login.is_default(),
+                name: login.name,
+            })
+        })
+        .collect()
 }
 
 /// A `tea` login reduced to what remote matching needs.
@@ -253,9 +260,13 @@ struct TeaLoginHost {
 }
 
 fn host_of_url(url: &str) -> Option<String> {
+    authority_of_url(url).map(|host| strip_port(host).to_ascii_lowercase())
+}
+
+fn authority_of_url(url: &str) -> Option<&str> {
     let without_scheme = strip_scheme(url).unwrap_or(url);
     let host = without_scheme.split('/').next()?.trim();
-    (!host.is_empty()).then(|| strip_port(host).to_ascii_lowercase())
+    (!host.is_empty()).then_some(host)
 }
 
 /// The `tea` login name configured for `host`, if any.
@@ -809,6 +820,7 @@ where
         let mergeable = raw
             .mergeable
             .map(|ok| if ok { "MERGEABLE" } else { "CONFLICTING" }.to_string());
+        let base_sha_confirmed = raw.merge_base.as_ref().is_some_and(|sha| !sha.is_empty());
         let details = into_details(raw, &repository);
 
         // Effective response per reviewer. A newer decisive review replaces an
@@ -918,6 +930,7 @@ where
 
         Ok(PullRequestInfo {
             details,
+            base_sha_confirmed,
             review_decision,
             mergeable,
             merge_state: None,
@@ -1131,6 +1144,7 @@ fn into_summary(pr: GiteaPullRequest, repository: &ForgeRepository) -> PullReque
         title: pr.title,
         author: GiteaUser::login(pr.user),
         head_ref_name: display_ref(&pr.head.ref_name),
+        head_sha: Some(pr.head.sha).filter(|sha| !sha.is_empty()),
         base_ref_name: display_ref(&pr.base.ref_name),
         updated_at: pr.updated_at,
         last_commit_at: None,
@@ -1192,6 +1206,7 @@ fn issue_into_summary(issue: GiteaIssue, repository: &ForgeRepository) -> PullRe
         author: GiteaUser::login(issue.user),
         // The issue search endpoint does not carry branch names.
         head_ref_name: String::new(),
+        head_sha: None,
         base_ref_name: String::new(),
         updated_at: issue.updated_at,
         last_commit_at: None,
@@ -1767,16 +1782,22 @@ mod tests {
     }
 
     #[test]
-    fn should_fall_back_to_base_sha_when_merge_base_is_absent() {
+    fn should_keep_base_sha_unconfirmed_when_merge_base_is_absent() {
         let json = PR_JSON.replace(
             "\"merge_base\": \"cccccccccccccccccccccccccccccccccccccccc\",",
             "",
         );
-        let runner = FakeTeaRunner::default().route("/pulls/42", &json);
-        let details = GiteaTeaBackend::with_runner(Some(repo()), runner)
-            .get_pull_request(PullRequestTarget::number(42, "42"))
-            .expect("details");
-        assert_eq!(details.base_sha, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let runner = FakeTeaRunner::default()
+            .route("/pulls/42", &json)
+            .route_counted("/pulls/42/reviews", "[]", 0);
+        let info = GiteaTeaBackend::with_runner(Some(repo()), runner)
+            .get_pull_request_info(PullRequestTarget::number(42, "42"))
+            .expect("info");
+        assert_eq!(
+            info.details.base_sha,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        assert!(!info.base_sha_confirmed);
     }
 
     #[test]
@@ -2602,8 +2623,9 @@ mod tests {
 
     #[test]
     fn should_fetch_pull_request_details_once_for_the_info_panel() {
-        let (_, detail_gets) = info_for(&[]);
+        let (info, detail_gets) = info_for(&[]);
         assert_eq!(detail_gets, 1);
+        assert!(info.base_sha_confirmed);
     }
 
     #[test]

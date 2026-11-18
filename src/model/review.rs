@@ -35,7 +35,7 @@ pub(crate) enum CommentLocation {
 /// UTF-8 paths stay plain strings (so existing files read unchanged); on Unix
 /// any other path is written as `"\0unix-hex:<hex bytes>"` (a path cannot
 /// contain NUL, so the tag is unambiguous) and decoded back to the exact bytes.
-mod path_codec {
+pub(crate) mod path_codec {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};

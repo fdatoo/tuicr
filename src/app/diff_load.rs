@@ -438,6 +438,7 @@ impl App {
 
         self.diff_files = diff_files;
         self.diff_source = diff_source;
+        self.applied_local_subset = None;
         self.clear_commit_pane();
         self.input_mode = InputMode::Normal;
         self.reset_diff_state();
@@ -480,6 +481,7 @@ impl App {
     ) -> Result<()> {
         self.pr_commits.clear();
         self.pr_last_reviewed_commit_index = None;
+        self.applied_local_subset = None;
         self.range_diff_files = Some(self.diff_files.clone());
         self.commit_list = review_commits.clone();
         let range = Self::initial_commit_range(start, review_commits.len());
@@ -811,6 +813,7 @@ impl App {
             }
         }
 
+        self.invalidate_companion_for_local_reload(&diff_files);
         self.diff_files = diff_files;
         self.clear_expanded_gaps();
         self.insert_commit_message_if_single();
@@ -868,6 +871,18 @@ impl App {
     /// `invalidated_count` is the number of previously reviewed files whose content changed.
     pub fn reload_diff_files(&mut self) -> Result<(usize, usize)> {
         let diff_files = self.fetch_diff_files()?;
+        self.apply_local_reload(diff_files)
+    }
+
+    /// Reload an open local review, including the transition to an empty diff
+    /// if the last change was reverted. The lower-level reload API leaves
+    /// `NoChanges` for callers such as staging that handle that case themselves.
+    pub fn reload_diff_view(&mut self) -> Result<(usize, usize)> {
+        let diff_files = empty_if_no_changes(self.fetch_diff_files())?;
+        self.apply_local_reload(diff_files)
+    }
+
+    fn apply_local_reload(&mut self, diff_files: Vec<DiffFile>) -> Result<(usize, usize)> {
         let full_reload = !Self::is_strict_commit_selection(
             self.commit_selection_range,
             self.review_commits.len(),
@@ -876,6 +891,13 @@ impl App {
         if full_reload {
             self.persist_diff_reconciliation(&diff_files)?;
         }
+        self.applied_local_subset = (!full_reload).then(|| {
+            Self::narrowed_fetch_source(
+                &self.diff_source,
+                &self.review_commits,
+                self.commit_selection_range,
+            )
+        });
         let (count, applied_invalidated) = self.apply_diff_files(diff_files);
         Ok((
             count,
@@ -937,14 +959,14 @@ impl App {
         path_filter: Option<&str>,
         current: u64,
     ) -> Result<Option<Vec<DiffFile>>> {
-        let probe = Self::fetch_diff_files_for_source(
+        let probe = empty_if_no_changes(Self::fetch_diff_files_for_source(
             vcs,
             root_path,
             fetch_source,
             revision_range,
             probe_highlighter(),
             path_filter,
-        )?;
+        ))?;
         if diff_files_fingerprint(&probe) == current {
             return Ok(None);
         }
@@ -953,14 +975,14 @@ impl App {
         // edit that lands between them can be reverted, leaving a fetch that matches
         // the screen again. Applying it would reset collapsed folders and expanded
         // gaps with nothing new to show.
-        let fetched = Self::fetch_diff_files_for_source(
+        let fetched = empty_if_no_changes(Self::fetch_diff_files_for_source(
             vcs,
             root_path,
             fetch_source,
             revision_range,
             highlighter,
             path_filter,
-        )?;
+        ))?;
         if diff_files_fingerprint(&fetched) == current {
             return Ok(None);
         }
@@ -998,6 +1020,7 @@ impl App {
         self.reset_persisted_session_tracking()?;
 
         self.diff_files = diff_files;
+        self.revision_range = None;
         self.diff_source = DiffSource::StagedUnstagedAndCommits(selected_ids);
         self.input_mode = InputMode::Normal;
         self.reset_diff_state();
@@ -1069,10 +1092,9 @@ impl App {
         }
 
         // Past this point the tick was due, so every answer carries the
-        // interval and the caller advances the deadline. A tick arriving while
-        // the user is composing waits a full interval rather than firing the
-        // moment the editor closes. Mirrors `poll_persisted_session_changes`.
-        if self.input_mode != InputMode::Normal {
+        // interval and the caller advances the deadline. Ask keeps the diff
+        // visible without editing its coordinates, so it can accept a reload.
+        if !matches!(self.input_mode, InputMode::Normal | InputMode::Companion) {
             return DiffWatchTick::Defer(interval);
         }
 
@@ -1243,6 +1265,19 @@ impl App {
         ) {
             return false;
         }
+        let applied_subset = if matches!(&result, Ok(Some(_)))
+            && Self::is_strict_commit_selection(
+                request.commit_selection_range,
+                self.review_commits.len(),
+            ) {
+            Some(Self::narrowed_fetch_source(
+                &request.diff_source,
+                &self.review_commits,
+                request.commit_selection_range,
+            ))
+        } else {
+            None
+        };
 
         let commit_pane_changed = self.apply_fetched_commits(commits, change_status);
 
@@ -1255,7 +1290,11 @@ impl App {
             }
             Ok(Some(diff_files)) => {
                 self.last_diff_watch_error = None;
-                self.apply_watched_diff(diff_files)
+                let applied = self.apply_watched_diff(diff_files);
+                if applied {
+                    self.applied_local_subset = applied_subset;
+                }
+                applied
             }
             Err(err) => {
                 let text = format!("Diff watch failed: {err}");
@@ -1598,11 +1637,9 @@ pub(in crate::app) enum DiffWatchTick {
     Fetch(Duration),
 }
 
-/// True when a landed diff-watch result should be discarded rather than
-/// applied to `current_*`: the diff source changed, the commit selection
-/// changed, or the mode has left `Normal` since the fetch was spawned. See
-/// `apply_diff_files`'s doc comment for why any of these invalidate the
-/// cursor-capture it depends on.
+/// Discard landed results if the diff source or commit selection changed, or
+/// the active mode edits the diff's coordinates. See `apply_diff_files` for
+/// the cursor-position snapshot this protects.
 pub(in crate::app) fn diff_watch_result_is_stale(
     request: &DiffWatchReloadRequest,
     current_diff_source: &DiffSource,
@@ -1611,7 +1648,7 @@ pub(in crate::app) fn diff_watch_result_is_stale(
 ) -> bool {
     request.diff_source != *current_diff_source
         || request.commit_selection_range != current_commit_selection_range
-        || current_input_mode != InputMode::Normal
+        || !matches!(current_input_mode, InputMode::Normal | InputMode::Companion)
 }
 
 /// Maps the worker's fetch outcome onto the channel's `String`-error wire
@@ -1636,6 +1673,13 @@ fn probe_highlighter() -> &'static SyntaxHighlighter {
     PROBE.get_or_init(SyntaxHighlighter::plain)
 }
 
+fn empty_if_no_changes(result: Result<Vec<DiffFile>>) -> Result<Vec<DiffFile>> {
+    match result {
+        Err(TuicrError::NoChanges) => Ok(Vec::new()),
+        other => other,
+    }
+}
+
 /// Fingerprint of one file. `content_hash` alone is insufficient: binary and
 /// too-large files all carry the same empty-hunks hash, so a file flipping to
 /// too-large would otherwise look unchanged.
@@ -1652,6 +1696,18 @@ fn file_fingerprint(file: &DiffFile) -> u64 {
         file.is_too_large as u8,
     ]);
     hasher.write(&file.content_hash.to_le_bytes());
+    // Review-mark hashes intentionally ignore coordinates. The watcher must
+    // also notice when the same text moved before restoring line anchors.
+    for hunk in &file.hunks {
+        for coordinate in [
+            hunk.old_start,
+            hunk.old_count,
+            hunk.new_start,
+            hunk.new_count,
+        ] {
+            hasher.write(&coordinate.to_le_bytes());
+        }
+    }
     hasher.finish()
 }
 

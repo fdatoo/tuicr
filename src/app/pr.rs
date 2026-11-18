@@ -7,6 +7,7 @@ impl App {
     /// `insert_message` is false only while a strict initial selection's range
     /// diff is still loading, so no message sits above the cumulative diff.
     pub(in crate::app) fn rebuild_pr_diff_view(&mut self, insert_message: bool) {
+        self.invalidate_companion_diff();
         if insert_message {
             self.insert_commit_message_if_single();
         } else {
@@ -62,6 +63,8 @@ impl App {
         self.diff_files = diff_files;
         self.reset_persisted_session_tracking()?;
         self.diff_source = DiffSource::PullRequest(Box::new(pr_source));
+        self.applied_pr_range = None;
+        self.applied_local_subset = None;
         self.forge_backend = Some(backend);
         self.forge_repository = Some(key.repository.clone());
         // Reset remote-comment state on every PR mode entry; the new PR's
@@ -75,6 +78,7 @@ impl App {
         self.pr_reload_rx = None;
         self.pr_range_reload_state = None;
         self.pr_range_reload_rx = None;
+        self.prepare_on_initial_range = None;
         // Latest known remote head — equal to the session head at open time;
         // refreshed by future `gh pr view` calls in PR 6.
         self.current_pr_head = Some(details.head_sha.clone());
@@ -181,6 +185,7 @@ impl App {
         self.pr_reload_rx = None;
         self.pr_range_reload_state = None;
         self.pr_range_reload_rx = None;
+        self.prepare_on_initial_range = None;
         self.current_pr_head = None;
         // Annotations were built while the PR state was still present.
         self.rebuild_annotations();
@@ -319,6 +324,11 @@ impl App {
     /// when the resolved parent isn't available — in that case the
     /// caller falls back to the cached cumulative PR diff.
     pub fn pr_range_sha_pair(&self) -> Option<(String, String)> {
+        self.pr_range_target()
+            .map(|range| (range.start_sha, range.end_sha))
+    }
+
+    fn pr_range_target(&self) -> Option<AppliedPrRange> {
         let DiffSource::PullRequest(ref pr) = self.diff_source else {
             return None;
         };
@@ -328,15 +338,30 @@ impl App {
         }
         // Newest-first: `end_idx` is the oldest, `start_idx` is the newest.
         let newest = self.pr_commits.get(start_idx)?;
-        // Parent of the oldest selected commit. If the oldest selected commit
-        // is the PR's first commit (oldest commit overall, at the bottom of
-        // the list), its parent is the PR's base SHA.
-        let parent_sha = if end_idx + 1 < self.pr_commits.len() {
-            self.pr_commits[end_idx + 1].oid.clone()
-        } else {
-            pr.base_sha.clone()
-        };
-        Some((parent_sha, newest.oid.clone()))
+        // Usually the next older PR commit gives the start of the range.
+        // If the subset includes the PR's oldest commit, retain the
+        // cumulative SHA as a fallback without promoting it to evidence.
+        let (start_sha, start_sha_confirmed) =
+            if let Some(parent) = self.pr_commits.get(end_idx + 1) {
+                (parent.oid.clone(), true)
+            } else {
+                (pr.base_sha.clone(), self.pr_cumulative_base_confirmed(pr))
+            };
+        Some(AppliedPrRange {
+            start_sha,
+            start_sha_confirmed,
+            end_sha: newest.oid.clone(),
+        })
+    }
+
+    pub(super) fn pr_cumulative_base_confirmed(&self, pr: &PullRequestDiffSource) -> bool {
+        self.pr_info.as_ref().is_some_and(|info| {
+            info.base_sha_confirmed
+                && info.details.base_sha == pr.base_sha
+                && info.details.head_sha == pr.key.head_sha
+                && info.details.number == pr.key.number
+                && info.details.repository == pr.key.repository
+        })
     }
 
     /// Reload the PR diff for the currently selected inline commit
@@ -389,8 +414,10 @@ impl App {
         // A late subset result must not overwrite the all-commits view.
         self.pr_range_reload_state = None;
         self.pr_range_reload_rx = None;
+        self.prepare_on_initial_range = None;
         let anchor = self.capture_pr_cursor_anchor();
         self.diff_files = files;
+        self.applied_pr_range = None;
         self.clear_expanded_gaps();
         Self::register_diff_files(&mut self.session, &self.diff_files, true);
         self.rebuild_pr_diff_view(true);
@@ -406,7 +433,12 @@ impl App {
         let DiffSource::PullRequest(current) = self.diff_source.clone() else {
             return;
         };
-        let Some((start_sha, end_sha)) = self.pr_range_sha_pair() else {
+        let Some(AppliedPrRange {
+            start_sha,
+            start_sha_confirmed,
+            end_sha,
+        }) = self.pr_range_target()
+        else {
             return;
         };
         let Some(range) = self.commit_selection_range else {
@@ -419,6 +451,7 @@ impl App {
             pr_number: current.key.number,
             head_sha: current.key.head_sha.clone(),
             start_sha: start_sha.clone(),
+            start_sha_confirmed,
             end_sha: end_sha.clone(),
             range,
             started_at: Instant::now(),
@@ -426,6 +459,7 @@ impl App {
         };
         // A fresh toggle supersedes any in-flight fetch.
         self.pr_range_reload_state = Some(request.clone());
+        self.invalidate_companion_diff();
 
         let local_checkout = self
             .forge_backend
@@ -514,10 +548,14 @@ impl App {
             Ok(patches) => {
                 if let Err(e) = self.finish_pr_range_reload(&request, patches) {
                     self.set_error(format!("Range diff failed: {e}"));
+                    self.prepare_on_initial_range = None;
+                } else {
+                    self.finish_prepare_on_open(request.range);
                 }
             }
             Err(e) => {
                 self.set_error(format!("Range diff failed: {e}"));
+                self.prepare_on_initial_range = None;
             }
         }
     }
@@ -546,6 +584,11 @@ impl App {
         };
 
         self.diff_files = parsed;
+        self.applied_pr_range = Some(AppliedPrRange {
+            start_sha: request.start_sha.clone(),
+            start_sha_confirmed: request.start_sha_confirmed,
+            end_sha: request.end_sha.clone(),
+        });
         self.clear_expanded_gaps();
         // Range diffs can hide hunks that are still reviewed in the broader
         // PR session, so registration must not prune them.
@@ -592,6 +635,7 @@ impl App {
             restore_overview_cursor,
         };
         self.pr_reload_state = Some(request.clone());
+        self.invalidate_companion_diff();
 
         let local_checkout = self
             .forge_backend
@@ -707,6 +751,7 @@ impl App {
             self.apply_same_head_pr_reload(opened);
             self.refetch_pr_threads();
             self.set_message("Reloaded PR (no new commits)".to_string());
+            self.invalidate_companion_diff();
         }
 
         if let Some(line) = request.restore_overview_cursor {
@@ -738,6 +783,7 @@ impl App {
         self.pr_range_reload_state = None;
         self.pr_range_reload_rx = None;
         self.diff_files = diff_files;
+        self.applied_pr_range = None;
         self.clear_expanded_gaps();
         Self::register_diff_files(&mut self.session, &self.diff_files, false);
         if !commits.is_empty() {
@@ -812,6 +858,7 @@ impl App {
                 self.range_diff_files = Some(opened.diff_files.clone());
             }
             self.diff_files = opened.diff_files;
+            self.applied_pr_range = None;
             self.clear_expanded_gaps();
             for file in &self.diff_files {
                 self.session.add_diff_file(file);
@@ -1038,6 +1085,7 @@ impl App {
             }
         }
         self.pr_tab.clamp_cursor();
+        self.refresh_preparation_ui();
     }
 
     pub fn pr_tab_cursor_up(&mut self) {
@@ -1085,6 +1133,50 @@ impl App {
         };
         self.spawn_pr_open(&summary.repository, summary.number);
         true
+    }
+
+    pub(crate) fn prepare_selected_pr(&mut self) {
+        use crate::review_guide::{PrepTarget, ReviewKey};
+
+        let Some(summary) = self.pr_tab.cursor_pr() else {
+            return;
+        };
+        let key = ReviewKey::for_repository(&summary.repository, summary.number);
+        let target = PrepTarget::PullRequest {
+            repository: summary.repository.clone(),
+            number: summary.number,
+            head_sha: summary.head_sha.as_deref().unwrap_or_default().to_owned(),
+        };
+        let mut args = Vec::with_capacity(4);
+        let pr = if let Some((flag, value)) = &self.preparation_ui.repo_flag {
+            args.extend([(*flag).into(), value.clone()]);
+            summary.number.to_string()
+        } else if summary.url.is_empty() {
+            summary.number.to_string()
+        } else {
+            summary.url.clone()
+        };
+        args.extend(["pr".into(), pr.into()]);
+        let started = chrono::Utc::now();
+        match crate::prepare::spawn_tracked(&args, &key, &target, &summary.title) {
+            Ok(()) => self.watch_preparation(key, started),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                self.set_message("This pull request is already preparing");
+            }
+            Err(error) => self.set_error(format!("Could not start review preparation: {error}")),
+        }
+    }
+
+    pub(crate) fn cancel_selected_pr_preparation(&mut self) {
+        let Some(summary) = self.pr_tab.cursor_pr() else {
+            return;
+        };
+        let key =
+            crate::review_guide::ReviewKey::for_repository(&summary.repository, summary.number);
+        match crate::prepare::cancel(&key) {
+            Ok(()) => self.refresh_preparation_ui(),
+            Err(error) => self.set_error(format!("Could not cancel review preparation: {error}")),
+        }
     }
 
     /// The local clone backing `repo`, when tuicr was launched inside one of
@@ -1256,6 +1348,7 @@ impl App {
                 request.pr_number,
             ));
         }
+        self.maybe_prepare_on_open();
         Ok(())
     }
 
@@ -1557,6 +1650,7 @@ impl App {
     pub fn commit_pr_filter(&mut self) {
         if let Some(draft) = self.pr_filter_draft.take() {
             self.pr_tab.set_filter(draft);
+            self.refresh_preparation_ui();
         }
     }
 

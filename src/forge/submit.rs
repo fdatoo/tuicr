@@ -503,14 +503,14 @@ pub struct MovedToSummaryItem {
     pub file: PathBuf,
 }
 
-/// Builds the GitHub review body. Returns an empty string when there's
-/// nothing to say (no summary items, no footer, no review-level comments).
+/// Builds the review body with the optional coverage note after the comments.
 ///
 /// `review_level` are tuicr's review-level comments (`session.review_comments`)
 /// already-formatted for the body. They appear above the unplaced section.
 pub fn build_review_body(
     review_level: &[Comment],
     moved_to_summary: &[MovedToSummaryItem],
+    coverage_note: Option<&str>,
     ctx: SubmitContext<'_>,
 ) -> String {
     let mut sections: Vec<String> = Vec::new();
@@ -552,7 +552,14 @@ pub fn build_review_body(
         sections.push(block);
     }
 
-    sections.join("\n\n")
+    let mut body = sections.join("\n\n");
+    if let Some(note) = coverage_note.filter(|note| !note.is_empty()) {
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str(note);
+    }
+    body
 }
 
 #[cfg(test)]
@@ -1246,7 +1253,12 @@ mod tests {
 
     #[test]
     fn should_return_empty_body_when_no_inputs() {
-        let body = build_review_body(&[], &[], ctx_of(&default_config(), &test_comment_types()));
+        let body = build_review_body(
+            &[],
+            &[],
+            None,
+            ctx_of(&default_config(), &test_comment_types()),
+        );
         assert_eq!(body, "");
     }
 
@@ -1256,6 +1268,7 @@ mod tests {
         let body = build_review_body(
             &comments,
             &[],
+            None,
             ctx_of(&default_config(), &test_comment_types()),
         );
         assert_eq!(body, "[NOTE] first\n\n[NOTE] second");
@@ -1270,6 +1283,7 @@ mod tests {
         let body = build_review_body(
             &[],
             &[item],
+            None,
             ctx_of(&default_config(), &test_comment_types()),
         );
         assert!(body.contains("## Unplaced comments"));
@@ -1286,11 +1300,13 @@ mod tests {
         let body = build_review_body(
             &review,
             &summary,
+            Some("Reviewed with a guide: verified 1 of 2 stops."),
             ctx_of(&default_config(), &test_comment_types()),
         );
         let top = body.find("[NOTE] top").expect("review comment");
         let middle = body.find("## Unplaced comments").expect("unplaced section");
         assert!(top < middle, "section ordering: {body}");
+        assert!(body.ends_with("\n\nReviewed with a guide: verified 1 of 2 stops."));
     }
 
     #[test]
@@ -1300,7 +1316,7 @@ mod tests {
             pr_search: None,
         };
         let comments = vec![note("just text")];
-        let body = build_review_body(&comments, &[], ctx_of(&cfg, &test_comment_types()));
+        let body = build_review_body(&comments, &[], None, ctx_of(&cfg, &test_comment_types()));
         assert_eq!(body, "just text");
     }
 
@@ -1314,11 +1330,13 @@ mod tests {
         let body = build_review_body(
             &comments,
             &summary,
+            Some(""),
             ctx_of(&default_config(), &test_comment_types()),
         );
         assert!(!body.contains('['), "no type tag expected on None: {body}");
         assert!(body.contains("untyped"));
         assert!(body.contains("- a.rs: also untyped"));
+        assert!(!body.contains("Reviewed with a guide"));
     }
 
     #[test]
@@ -1388,6 +1406,7 @@ mod tests {
         let body = build_review_body(
             &comments,
             &[],
+            None,
             ctx_of(&default_config(), &test_comment_types()),
         );
         assert!(body.contains("[💬 NOTE] a thought"), "body was: {body}");
@@ -1399,6 +1418,7 @@ mod tests {
         let body = build_review_body(
             &[],
             &[item],
+            None,
             ctx_of(&default_config(), &test_comment_types()),
         );
         assert!(

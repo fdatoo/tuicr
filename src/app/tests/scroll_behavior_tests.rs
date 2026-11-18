@@ -793,6 +793,37 @@ fn mouse_wheel_scrolls_diff_by_configured_lines() {
 }
 
 #[test]
+fn wheel_motion_crosses_file_boundary_and_reverses_at_same_spacing_row() {
+    use crossterm::event::MouseEventKind::{ScrollDown, ScrollUp};
+
+    for mode in [DiffViewMode::Unified, DiffViewMode::SideBySide] {
+        let mut app = build_scroll_app(40, 1, 0);
+        let mut second = app.diff_files[0].clone();
+        second.new_path = Some(PathBuf::from("test2.rs"));
+        app.diff_files.push(second);
+        app.diff_view_mode = mode;
+        app.rebuild_annotations();
+
+        let next_header = app.calculate_file_scroll_offset(1);
+        app.diff_state.scroll_offset = next_header - 4;
+        app.diff_state.cursor_line = next_header - 4;
+        wheel_over_diff(&mut app, ScrollDown);
+        assert_eq!(app.diff_state.cursor_line, next_header - 1);
+        assert_eq!(app.diff_state.current_file_idx, 0);
+
+        wheel_over_diff(&mut app, ScrollDown);
+        assert_eq!(app.diff_state.scroll_offset, next_header + 2);
+        assert_eq!(app.diff_state.cursor_line, next_header + 2);
+        assert_eq!(app.diff_state.current_file_idx, 1);
+
+        wheel_over_diff(&mut app, ScrollUp);
+        assert_eq!(app.diff_state.scroll_offset, next_header - 1);
+        assert_eq!(app.diff_state.cursor_line, next_header - 1);
+        assert_eq!(app.diff_state.current_file_idx, 0);
+    }
+}
+
+#[test]
 fn diff_state_wraps_off_by_default() {
     assert!(!DiffState::default().wrap_lines);
 }

@@ -8,12 +8,13 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, FocusedPanel, InputMode};
+use crate::app::{AnnotatedLine, App, FocusedPanel, InputMode};
+use crate::forge::remote_comments::PrCommentsVisibility;
 use crate::model::{DiffLine, LineOrigin, LineRange, LineSide};
 use crate::theme::Theme;
 use crate::ui::comment_panel;
 use crate::ui::diff_view::{
-    FileBody, append_eof_gap, append_file_preamble, append_gap_and_hunk_header,
+    DiffRows, FileBody, append_eof_gap, append_file_preamble, append_gap_and_hunk_header,
     apply_horizontal_scroll, comment_box_row, comment_type_presentation, cursor_indicator,
     diff_stat_title, paint_cursor_line_highlight, paint_visual_selection_overlay,
     populate_row_to_annotation, scroll_comment_input_into_view, skip_comment_box,
@@ -44,7 +45,7 @@ fn sbs_wrapped_sides(meta: &SbsRowMeta, content_width: usize) -> (WrappedRows, W
 }
 
 fn sbs_row_height(
-    lines: &[Line],
+    lines: &DiffRows<'_>,
     sbs_meta: &std::collections::HashMap<usize, SbsRowMeta>,
     idx: usize,
     wrap: bool,
@@ -342,7 +343,7 @@ struct SideBySideContext<'a> {
     comment_bars: std::cell::RefCell<Vec<crate::ui::diff_view::CommentBarAnchor>>,
     sbs_meta: std::cell::RefCell<std::collections::HashMap<usize, SbsRowMeta>>,
     // Only fully build spans for diff lines whose `line_idx` falls in this
-    // half-open range; off-screen rows push `Line::default()` placeholders.
+    // half-open range; off-screen rows advance the logical position only.
     visible_start: usize,
     visible_end: usize,
     search_style: Style,
@@ -383,12 +384,12 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
     // When the diff is the only pane, drop the frame entirely — including its
     // title row. The file name and stats are folded into the top header line
     // instead (see status_bar::render_header) so there's a single header line.
-    let sole = app.is_diff_sole_pane();
+    let framed = crate::ui::diff_view::diff_has_border(app, area);
     let mut block = Block::default()
-        .borders(if sole { Borders::NONE } else { Borders::ALL })
+        .borders(if framed { Borders::ALL } else { Borders::NONE })
         .style(styles::panel_style(&app.theme))
         .border_style(styles::border_style(&app.theme, focused));
-    if !sole {
+    if framed {
         block = block
             .title(crate::ui::diff_view::diff_title(app, area.width))
             .title_top(diff_stat_title(app).right_aligned());
@@ -397,12 +398,7 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Update viewport height for scroll calculations
-    app.diff_state.viewport_height = inner.height as usize;
-    app.diff_inner_area = Some(inner);
-
-    // Size the PR-info rows (built below) at the real width, not last frame's.
-    app.sync_viewport_width(inner.width as usize);
+    let landing = crate::ui::diff_view::sync_diff_viewport(app, inner);
 
     // Reset comment input annotation offset (will be set if a comment input box is rendered)
     app.comment_input_annotation_offset = None;
@@ -416,7 +412,10 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
         && !app.comment_is_file_level
         && !app.comment_is_review_level;
 
-    let (visible_start, visible_end) = crate::ui::diff_view::diff_visible_range(app, inner);
+    let (visible_start, visible_end) = landing.as_ref().map_or_else(
+        || crate::ui::diff_view::diff_visible_range(app, inner),
+        |landing| landing.retained_range(usize::from(inner.height)),
+    );
 
     let ctx = SideBySideContext {
         app,
@@ -440,11 +439,10 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
         search_style: styles::search_match_style(&app.theme),
     };
 
-    // Build all diff lines for side-by-side view
-    let mut lines: Vec<Line> = Vec::new();
+    let mut lines = DiffRows::new((visible_start, visible_end));
     let mut line_idx: usize = 0;
 
-    crate::ui::pr_info_panel::append_pr_info_section(
+    crate::ui::pr_info_panel::emit_pr_info_section(
         app,
         &mut lines,
         &mut line_idx,
@@ -461,7 +459,7 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
     );
     let mut input = review_section;
 
-    crate::ui::pr_info_panel::append_issue_comments_section(
+    crate::ui::pr_info_panel::emit_issue_comments_section(
         app,
         &mut lines,
         &mut line_idx,
@@ -502,6 +500,10 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
                 .get(path)
                 .map(|r| &r.line_comments)
                 .unwrap_or(&crate::ui::diff_view::EMPTY_LINE_COMMENTS);
+            let cull_hunk = line_comments.is_empty()
+                && app.input_mode != InputMode::Comment
+                && (app.forge_review_threads.is_empty()
+                    || app.session.remote_comments_visibility == PrCommentsVisibility::Hide);
 
             for (hunk_idx, hunk) in file.hunks.iter().enumerate() {
                 if append_gap_and_hunk_header(
@@ -517,6 +519,19 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
                         render_sbs_expanded_context_line(lines, line_idx, expanded_line, &ctx);
                     },
                 ) {
+                    continue;
+                }
+
+                if cull_hunk
+                    && let Some(end) = render_visible_uncommented_hunk(
+                        &ctx,
+                        (file_idx, hunk_idx),
+                        &hunk.lines,
+                        line_idx,
+                        &mut lines,
+                    )
+                {
+                    line_idx = end;
                     continue;
                 }
 
@@ -576,6 +591,11 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
     // Auto-scroll so the comment input box stays visible while the user types.
     let wrap = app.diff_state.wrap_lines;
     let viewport_width = inner.width as usize;
+    if let Some(landing) = landing {
+        app.diff_state.scroll_offset = landing.offset(usize::from(inner.height), |idx| {
+            sbs_row_height(&lines, &sbs_meta, idx, wrap, content_width, viewport_width)
+        });
+    }
     scroll_comment_input_into_view(
         &mut app.diff_state.scroll_offset,
         input.input_box_range,
@@ -585,11 +605,8 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
         |idx| sbs_row_height(&lines, &sbs_meta, idx, wrap, content_width, viewport_width),
     );
 
-    let visible_lines_unscrolled: Vec<Line> = lines
-        .into_iter()
-        .skip(app.diff_state.scroll_offset)
-        .take(inner.height as usize)
-        .collect();
+    let visible_lines_unscrolled =
+        lines.into_visible(app.diff_state.scroll_offset, inner.height as usize);
 
     let max_content_width = sbs_meta
         .values()
@@ -736,6 +753,13 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
     // single cells.
     crate::ui::diff_view::paint_comment_box_bar(frame, &overlay_ctx);
     crate::ui::diff_view::paint_comment_box_right_border(frame, &overlay_ctx);
+    crate::ui::diff_view::paint_private_thread_marks(
+        frame,
+        inner,
+        app,
+        lw,
+        Some(content_width as u16),
+    );
 
     // Calculate screen position for comment cursor if in Comment mode
     if let Some(cursor_logical_line) = input.cursor_logical_line {
@@ -770,7 +794,7 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
 
 /// Render a single expanded context line in side-by-side mode
 fn render_sbs_expanded_context_line(
-    lines: &mut Vec<Line<'_>>,
+    lines: &mut DiffRows<'_>,
     line_idx: &mut usize,
     expanded_line: &crate::model::DiffLine,
     ctx: &SideBySideContext,
@@ -839,6 +863,70 @@ fn render_sbs_expanded_context_line(
     *line_idx += 1;
 }
 
+/// The annotations already pair additions with deletions. When no inline
+/// boxes intervene, use that contiguous run to jump straight to visible pairs.
+fn render_visible_uncommented_hunk(
+    ctx: &SideBySideContext,
+    (file_idx, hunk_idx): (usize, usize),
+    hunk_lines: &[DiffLine],
+    mut line_idx: usize,
+    lines: &mut DiffRows<'_>,
+) -> Option<usize> {
+    let annotations = &ctx.app.line_annotations;
+    if !matches!(
+        annotations.get(line_idx.checked_sub(1)?),
+        Some(AnnotatedLine::HunkHeader { file_idx: file, hunk_idx: hunk })
+            if (*file, *hunk) == (file_idx, hunk_idx)
+    ) {
+        return None;
+    }
+    let candidates = annotations.get(line_idx..)?;
+    let count = candidates.partition_point(|annotation| {
+        matches!(annotation, AnnotatedLine::SideBySideLine { file_idx: file, hunk_idx: hunk, .. }
+            if (*file, *hunk) == (file_idx, hunk_idx))
+    });
+    let visible = lines.visible_run(count);
+    lines.skip(visible.start);
+    line_idx += visible.start;
+    let suffix = count - visible.end;
+    let is_commit_message = ctx.app.diff_files[file_idx].is_commit_message;
+    let no_comments = &crate::ui::diff_view::EMPTY_LINE_COMMENTS;
+    for annotation in &candidates[visible] {
+        let &AnnotatedLine::SideBySideLine {
+            del_line_idx,
+            add_line_idx,
+            ..
+        } = annotation
+        else {
+            unreachable!("a hunk body without inline comments contains only paired rows");
+        };
+        if let Some(source_idx) = del_line_idx
+            && del_line_idx == add_line_idx
+        {
+            let render_context = if is_commit_message {
+                render_commit_message_line_side_by_side
+            } else {
+                render_context_line_side_by_side
+            };
+            (line_idx, _) = render_context(
+                &hunk_lines[source_idx],
+                no_comments,
+                ctx,
+                file_idx,
+                line_idx,
+                lines,
+            );
+        } else {
+            let del = del_line_idx.map(|idx| &hunk_lines[idx]);
+            let add = add_line_idx.map(|idx| &hunk_lines[idx]);
+            render_changed_row(ctx, del, add, line_idx, lines);
+            line_idx += 1;
+        }
+    }
+    lines.skip(suffix);
+    Some(line_idx + suffix)
+}
+
 /// Process and render all diff lines in a hunk for side-by-side view
 /// Returns (new_line_idx, optional cursor info for inline comment input)
 fn render_hunk_lines_side_by_side(
@@ -847,7 +935,7 @@ fn render_hunk_lines_side_by_side(
     ctx: &SideBySideContext,
     file_idx: usize,
     mut line_idx: usize,
-    lines: &mut Vec<Line>,
+    lines: &mut DiffRows<'_>,
 ) -> (usize, Option<SideBySideCursorInfo>) {
     let mut i = 0;
     let mut cursor_info_out: Option<SideBySideCursorInfo> = None;
@@ -941,7 +1029,7 @@ fn render_context_line_side_by_side(
     ctx: &SideBySideContext,
     file_idx: usize,
     mut line_idx: usize,
-    lines: &mut Vec<Line>,
+    lines: &mut DiffRows<'_>,
 ) -> (usize, Option<SideBySideCursorInfo>) {
     if ctx.is_visible(line_idx) {
         let w = ctx.lineno_width;
@@ -1028,7 +1116,7 @@ fn render_context_line_side_by_side(
             },
         );
     } else {
-        lines.push(Line::default());
+        lines.skip(1);
     }
     line_idx += 1;
 
@@ -1069,7 +1157,7 @@ fn render_deletion_addition_pair_side_by_side(
     ctx: &SideBySideContext,
     file_idx: usize,
     mut line_idx: usize,
-    lines: &mut Vec<Line>,
+    lines: &mut DiffRows<'_>,
 ) -> (usize, usize, Option<SideBySideCursorInfo>) {
     // Find the range of consecutive deletions
     let mut del_end = start_idx + 1;
@@ -1093,118 +1181,7 @@ fn render_deletion_addition_pair_side_by_side(
     for offset in 0..max_lines {
         let del_opt = (offset < del_count).then(|| &hunk_lines[start_idx + offset]);
         let add_opt = (offset < add_count).then(|| &hunk_lines[add_start + offset]);
-        if ctx.is_visible(line_idx) {
-            let indicator = cursor_indicator(line_idx, ctx.current_line_idx);
-
-            let mut spans = vec![Span::styled(
-                indicator,
-                styles::current_line_indicator_style(ctx.theme),
-            )];
-
-            // Left side (deletion)
-            if let Some(del_line) = del_opt {
-                add_deletion_spans(
-                    ctx.theme,
-                    &mut spans,
-                    del_line,
-                    ctx.content_width,
-                    ctx.lineno_width,
-                    ctx.display_lineno(del_line.old_lineno, line_idx),
-                    ctx.search_for(line_idx),
-                );
-            } else {
-                add_empty_column_spans(&mut spans, ctx.content_width, ctx.lineno_width);
-            }
-
-            spans.push(Span::styled(" │ ", styles::dim_style(ctx.theme)));
-
-            // Right side (addition)
-            if let Some(add_line) = add_opt {
-                add_addition_spans(
-                    ctx.theme,
-                    &mut spans,
-                    add_line,
-                    ctx.content_width,
-                    ctx.lineno_width,
-                    ctx.display_lineno(add_line.new_lineno, line_idx),
-                    ctx.search_for(line_idx),
-                );
-            } else {
-                add_empty_column_spans(&mut spans, ctx.content_width, ctx.lineno_width);
-            }
-
-            lines.push(Line::from(spans));
-
-            let w = ctx.lineno_width;
-            let (left_content, left_pad, left_marker, left_lineno, left_marker_style) =
-                match del_opt {
-                    Some(dl) => (
-                        content_spans_for_diff_line(
-                            ctx.theme,
-                            dl,
-                            LineOrigin::Deletion,
-                            ctx.search_for(line_idx),
-                        ),
-                        column_pad_style(ctx.theme, dl, LineOrigin::Deletion),
-                        "▌",
-                        ctx.display_lineno(dl.old_lineno, line_idx),
-                        styles::diff_marker_style(
-                            ctx.theme,
-                            LineOrigin::Deletion,
-                            dl.highlighted_spans.is_some(),
-                        ),
-                    ),
-                    None => (Vec::new(), Style::default(), " ", None, Style::default()),
-                };
-            let (right_content, right_pad, right_marker, right_lineno, right_marker_style) =
-                match add_opt {
-                    Some(al) => (
-                        content_spans_for_diff_line(
-                            ctx.theme,
-                            al,
-                            LineOrigin::Addition,
-                            ctx.search_for(line_idx),
-                        ),
-                        column_pad_style(ctx.theme, al, LineOrigin::Addition),
-                        "▌",
-                        ctx.display_lineno(al.new_lineno, line_idx),
-                        styles::diff_marker_style(
-                            ctx.theme,
-                            LineOrigin::Addition,
-                            al.highlighted_spans.is_some(),
-                        ),
-                    ),
-                    None => (Vec::new(), Style::default(), " ", None, Style::default()),
-                };
-            let (lp, rp) = sbs_row_prefixes(
-                ctx.theme,
-                indicator,
-                SideSpec {
-                    lineno: left_lineno,
-                    marker: left_marker,
-                    marker_style: left_marker_style,
-                },
-                SideSpec {
-                    lineno: right_lineno,
-                    marker: right_marker,
-                    marker_style: right_marker_style,
-                },
-                w,
-            );
-            ctx.sbs_meta.borrow_mut().insert(
-                line_idx,
-                SbsRowMeta {
-                    left_content,
-                    right_content,
-                    left_prefix: lp,
-                    right_prefix: rp,
-                    left_pad_style: left_pad,
-                    right_pad_style: right_pad,
-                },
-            );
-        } else {
-            lines.push(Line::default());
-        }
+        render_changed_row(ctx, del_opt, add_opt, line_idx, lines);
         line_idx += 1;
 
         // Add comments for deletion
@@ -1269,6 +1246,126 @@ fn render_deletion_addition_pair_side_by_side(
     (line_idx, add_end, cursor_info_out)
 }
 
+fn render_changed_row(
+    ctx: &SideBySideContext,
+    del_opt: Option<&DiffLine>,
+    add_opt: Option<&DiffLine>,
+    line_idx: usize,
+    lines: &mut DiffRows<'_>,
+) {
+    if ctx.is_visible(line_idx) {
+        let indicator = cursor_indicator(line_idx, ctx.current_line_idx);
+
+        let mut spans = vec![Span::styled(
+            indicator,
+            styles::current_line_indicator_style(ctx.theme),
+        )];
+
+        // Left side (deletion)
+        if let Some(del_line) = del_opt {
+            add_deletion_spans(
+                ctx.theme,
+                &mut spans,
+                del_line,
+                ctx.content_width,
+                ctx.lineno_width,
+                ctx.display_lineno(del_line.old_lineno, line_idx),
+                ctx.search_for(line_idx),
+            );
+        } else {
+            add_empty_column_spans(&mut spans, ctx.content_width, ctx.lineno_width);
+        }
+
+        spans.push(Span::styled(" │ ", styles::dim_style(ctx.theme)));
+
+        // Right side (addition)
+        if let Some(add_line) = add_opt {
+            add_addition_spans(
+                ctx.theme,
+                &mut spans,
+                add_line,
+                ctx.content_width,
+                ctx.lineno_width,
+                ctx.display_lineno(add_line.new_lineno, line_idx),
+                ctx.search_for(line_idx),
+            );
+        } else {
+            add_empty_column_spans(&mut spans, ctx.content_width, ctx.lineno_width);
+        }
+
+        lines.push(Line::from(spans));
+
+        let w = ctx.lineno_width;
+        let (left_content, left_pad, left_marker, left_lineno, left_marker_style) = match del_opt {
+            Some(dl) => (
+                content_spans_for_diff_line(
+                    ctx.theme,
+                    dl,
+                    LineOrigin::Deletion,
+                    ctx.search_for(line_idx),
+                ),
+                column_pad_style(ctx.theme, dl, LineOrigin::Deletion),
+                "▌",
+                ctx.display_lineno(dl.old_lineno, line_idx),
+                styles::diff_marker_style(
+                    ctx.theme,
+                    LineOrigin::Deletion,
+                    dl.highlighted_spans.is_some(),
+                ),
+            ),
+            None => (Vec::new(), Style::default(), " ", None, Style::default()),
+        };
+        let (right_content, right_pad, right_marker, right_lineno, right_marker_style) =
+            match add_opt {
+                Some(al) => (
+                    content_spans_for_diff_line(
+                        ctx.theme,
+                        al,
+                        LineOrigin::Addition,
+                        ctx.search_for(line_idx),
+                    ),
+                    column_pad_style(ctx.theme, al, LineOrigin::Addition),
+                    "▌",
+                    ctx.display_lineno(al.new_lineno, line_idx),
+                    styles::diff_marker_style(
+                        ctx.theme,
+                        LineOrigin::Addition,
+                        al.highlighted_spans.is_some(),
+                    ),
+                ),
+                None => (Vec::new(), Style::default(), " ", None, Style::default()),
+            };
+        let (lp, rp) = sbs_row_prefixes(
+            ctx.theme,
+            indicator,
+            SideSpec {
+                lineno: left_lineno,
+                marker: left_marker,
+                marker_style: left_marker_style,
+            },
+            SideSpec {
+                lineno: right_lineno,
+                marker: right_marker,
+                marker_style: right_marker_style,
+            },
+            w,
+        );
+        ctx.sbs_meta.borrow_mut().insert(
+            line_idx,
+            SbsRowMeta {
+                left_content,
+                right_content,
+                left_prefix: lp,
+                right_prefix: rp,
+                left_pad_style: left_pad,
+                right_pad_style: right_pad,
+            },
+        );
+    } else {
+        lines.skip(1);
+    }
+}
+
 /// Render a standalone addition (no matching deletion)
 /// Returns (new_line_idx, optional cursor info for inline comment input)
 fn render_standalone_addition_side_by_side(
@@ -1277,70 +1374,9 @@ fn render_standalone_addition_side_by_side(
     ctx: &SideBySideContext,
     file_idx: usize,
     mut line_idx: usize,
-    lines: &mut Vec<Line>,
+    lines: &mut DiffRows<'_>,
 ) -> (usize, Option<SideBySideCursorInfo>) {
-    if ctx.is_visible(line_idx) {
-        let indicator = cursor_indicator(line_idx, ctx.current_line_idx);
-
-        let mut spans = vec![Span::styled(
-            indicator,
-            styles::current_line_indicator_style(ctx.theme),
-        )];
-        add_empty_column_spans(&mut spans, ctx.content_width, ctx.lineno_width);
-        spans.push(Span::styled(" │ ", styles::dim_style(ctx.theme)));
-        add_addition_spans(
-            ctx.theme,
-            &mut spans,
-            diff_line,
-            ctx.content_width,
-            ctx.lineno_width,
-            ctx.display_lineno(diff_line.new_lineno, line_idx),
-            ctx.search_for(line_idx),
-        );
-
-        lines.push(Line::from(spans));
-
-        let w = ctx.lineno_width;
-        let right_content = content_spans_for_diff_line(
-            ctx.theme,
-            diff_line,
-            LineOrigin::Addition,
-            ctx.search_for(line_idx),
-        );
-        let right_pad = column_pad_style(ctx.theme, diff_line, LineOrigin::Addition);
-        let (lp, rp) = sbs_row_prefixes(
-            ctx.theme,
-            indicator,
-            SideSpec {
-                lineno: None,
-                marker: " ",
-                marker_style: Style::default(),
-            },
-            SideSpec {
-                lineno: ctx.display_lineno(diff_line.new_lineno, line_idx),
-                marker: "▌",
-                marker_style: styles::diff_marker_style(
-                    ctx.theme,
-                    LineOrigin::Addition,
-                    diff_line.highlighted_spans.is_some(),
-                ),
-            },
-            w,
-        );
-        ctx.sbs_meta.borrow_mut().insert(
-            line_idx,
-            SbsRowMeta {
-                left_content: Vec::new(),
-                right_content,
-                left_prefix: lp,
-                right_prefix: rp,
-                left_pad_style: Style::default(),
-                right_pad_style: right_pad,
-            },
-        );
-    } else {
-        lines.push(Line::default());
-    }
+    render_changed_row(ctx, None, Some(diff_line), line_idx, lines);
     line_idx += 1;
 
     // Add comments if any
@@ -1384,7 +1420,7 @@ fn render_commit_message_line_side_by_side(
     ctx: &SideBySideContext,
     file_idx: usize,
     mut line_idx: usize,
-    lines: &mut Vec<Line>,
+    lines: &mut DiffRows<'_>,
 ) -> (usize, Option<SideBySideCursorInfo>) {
     let ctx_style = styles::diff_context_style(ctx.theme);
 
@@ -1400,7 +1436,7 @@ fn render_commit_message_line_side_by_side(
 
         lines.push(Line::from(spans));
     } else {
-        lines.push(Line::default());
+        lines.skip(1);
     }
     line_idx += 1;
 
@@ -1554,7 +1590,7 @@ fn add_remote_threads_to_line(
     ctx: &SideBySideContext,
     file_path: &std::path::Path,
     mut line_idx: usize,
-    lines: &mut Vec<Line>,
+    lines: &mut DiffRows<'_>,
 ) -> usize {
     use crate::forge::remote_comments::{PrCommentsVisibility, RemoteCommentSide};
     let visibility = ctx.app.session.remote_comments_visibility;
@@ -1614,7 +1650,7 @@ fn add_comments_to_line(
     ctx: &SideBySideContext,
     file_idx: usize,
     mut line_idx: usize,
-    lines: &mut Vec<Line>,
+    lines: &mut DiffRows<'_>,
 ) -> (usize, Option<SideBySideCursorInfo>) {
     // Check if we're adding/editing a comment on this line and side
     let is_line_comment_mode = ctx.comment_input_mode
@@ -1694,7 +1730,7 @@ fn add_comments_to_line(
                         let comment_lines = comment_panel::format_comment_lines(
                             ctx.theme,
                             comment_type_presentation(ctx.app, &comment.comment_type),
-                            &comment.content,
+                            &comment.display_content(),
                             line_range,
                             ctx.panel_width.saturating_sub(1),
                             (comment.author != ctx.app.username).then_some(comment.author.as_str()),

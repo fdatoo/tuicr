@@ -97,6 +97,8 @@ pub struct GhPullRequestSummary {
     #[serde(default)]
     pub head_ref_name: String,
     #[serde(default)]
+    pub head_ref_oid: Option<String>,
+    #[serde(default)]
     pub base_ref_name: String,
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
@@ -116,6 +118,7 @@ impl GhPullRequestSummary {
             title: self.title,
             author: self.author.and_then(|author| author.login),
             head_ref_name: self.head_ref_name,
+            head_sha: self.head_ref_oid,
             base_ref_name: self.base_ref_name,
             updated_at: self.updated_at,
             last_commit_at: None,

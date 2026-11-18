@@ -5,7 +5,19 @@
 //! range or working-tree flags it was opened with. Rows come from
 //! [`ReviewStore::list_sessions_for_repo`], which is already newest-first.
 
+use chrono::{DateTime, Utc};
+
+use crate::review_guide::{PrepTarget, ReviewKey};
 use crate::review_store::{SessionKind, SessionSummary};
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PreparedReview {
+    pub key: ReviewKey,
+    pub target: PrepTarget,
+    pub title: String,
+    pub label: String,
+    pub started_at: DateTime<Utc>,
+}
 
 /// Rows for the Sessions tab, plus cursor and viewport state.
 ///
@@ -13,6 +25,7 @@ use crate::review_store::{SessionKind, SessionSummary};
 #[derive(Debug, Default)]
 pub struct SessionsTab {
     rows: Vec<SessionSummary>,
+    guide_rows: Vec<PreparedReview>,
     error: Option<String>,
     /// When true the listing also shows sessions with no comments and no
     /// reviewed files. They hold nothing to resume, so they are hidden by
@@ -47,7 +60,7 @@ impl SessionsTab {
             return;
         }
         self.rows.remove(index);
-        self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
+        self.cursor = self.cursor.min(self.len().saturating_sub(1));
     }
 
     /// Replace the rows with a fresh listing, resetting the cursor.
@@ -83,8 +96,37 @@ impl SessionsTab {
         &self.rows
     }
 
+    pub(crate) fn guide_rows(&self) -> &[PreparedReview] {
+        &self.guide_rows
+    }
+
+    pub(crate) fn cursor_guide(&self) -> Option<&PreparedReview> {
+        self.cursor
+            .checked_sub(self.rows.len())
+            .and_then(|index| self.guide_rows.get(index))
+    }
+
+    pub(crate) fn update_guide_rows(&mut self, guides: Vec<PreparedReview>) -> bool {
+        if guides == self.guide_rows {
+            return false;
+        }
+        let selected = self
+            .cursor_guide()
+            .and_then(|guide| guides.iter().position(|row| row.key == guide.key));
+        self.guide_rows = guides;
+        self.cursor = selected
+            .map_or(self.cursor, |index| self.rows.len() + index)
+            .min(self.len().saturating_sub(1));
+        self.scroll = self.scroll.min(self.cursor);
+        true
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len() + self.guide_rows.len()
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
+        self.rows.is_empty() && self.guide_rows.is_empty()
     }
 
     pub fn cursor(&self) -> usize {
@@ -105,9 +147,7 @@ impl SessionsTab {
     }
 
     pub fn cursor_down(&mut self) {
-        if !self.rows.is_empty() {
-            self.cursor = (self.cursor + 1).min(self.rows.len() - 1);
-        }
+        self.cursor = (self.cursor + 1).min(self.len().saturating_sub(1));
     }
 
     /// Keep the cursor inside the viewport after a move or a resize.

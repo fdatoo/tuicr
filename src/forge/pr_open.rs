@@ -111,13 +111,11 @@ fn fetch_pr_data_once(
     target: PullRequestTarget,
 ) -> Result<PrFetchData> {
     let mut pr_info = backend.get_pull_request_info(target)?;
-    // Pin `base_sha` to the commit the displayed patch is actually taken
-    // from before anything downstream reads it. Everything that resolves the
-    // old side of the diff — editor snapshots, context expansion, the
-    // commit-range fallback parent — derives from this field, so refining it
-    // once here keeps those consistent by construction.
+    // Keep the legacy best-effort base for existing consumers, but do not
+    // promote a branch tip to confirmed evidence when resolution fails.
     if let Some(base_sha) = backend.resolve_diff_base_sha(&pr_info.details) {
         pr_info.details.base_sha = base_sha;
+        pr_info.base_sha_confirmed = true;
     }
     let details = pr_info.details.clone();
     let (patches, (commits, review_metadata)) = join(
@@ -270,9 +268,8 @@ mod tests {
         details: PullRequestDetails,
         patch: String,
         calls: Mutex<Vec<&'static str>>,
-        /// Stands in for a backend whose `base_sha` is the base branch tip
-        /// rather than the merge base the patch is taken from. `None` models
-        /// a backend that already reports the merge base (GitLab).
+        /// Whether metadata itself identifies the patch's old-side commit.
+        reported_base_confirmed: bool,
         diff_base_sha: Option<String>,
         /// Head SHAs returned by successive metadata reads (last one repeats).
         heads: Mutex<Vec<String>>,
@@ -284,6 +281,7 @@ mod tests {
                 details,
                 patch: patch.to_string(),
                 calls: Mutex::new(Vec::new()),
+                reported_base_confirmed: false,
                 diff_base_sha: None,
                 heads: Mutex::new(Vec::new()),
             }
@@ -317,6 +315,12 @@ mod tests {
                 details.head_sha = head;
             }
             Ok(details)
+        }
+        fn get_pull_request_info(&self, target: PullRequestTarget) -> Result<PullRequestInfo> {
+            Ok(PullRequestInfo {
+                base_sha_confirmed: self.reported_base_confirmed,
+                ..PullRequestInfo::from_details(self.get_pull_request(target)?)
+            })
         }
         fn get_pull_request_diff(&self, _pr: &PullRequestDetails) -> Result<Vec<FilePatch>> {
             self.calls.lock().unwrap().push("get_pull_request_diff");
@@ -709,6 +713,7 @@ rename to new_name.rs
         // reload paths can't disagree about the old side.
         assert_eq!(opened.details.base_sha, "mergebase111");
         assert_eq!(opened.pr_info.details.base_sha, "mergebase111");
+        assert!(opened.pr_info.base_sha_confirmed);
         // and — resolution happened before the patch was fetched, so nothing
         // downstream ever observes the unrefined tip.
         let calls = backend.calls.lock().unwrap();
@@ -725,15 +730,24 @@ rename to new_name.rs
 
     #[test]
     fn should_keep_reported_base_sha_when_backend_needs_no_refinement() {
-        // given — a backend whose base_sha is already the merge base
-        // (GitLab's diff_refs.base_sha), modeled by returning None.
-        let backend = StaticBackend::new(details(), SIMPLE_PATCH);
+        let mut backend = StaticBackend::new(details(), SIMPLE_PATCH);
+        backend.reported_base_confirmed = true;
         let target = PullRequestTarget::with_repository(repo(), 125, "125");
         // when
         let opened = open_pull_request(&backend, target, None).unwrap();
         // then — untouched.
         assert_eq!(opened.details.base_sha, "1234567890abcdef");
         assert_eq!(opened.pr_info.details.base_sha, "1234567890abcdef");
+        assert!(opened.pr_info.base_sha_confirmed);
+    }
+
+    #[test]
+    fn should_keep_unresolved_base_as_an_unconfirmed_fallback() {
+        let backend = StaticBackend::new(details(), SIMPLE_PATCH);
+        let opened = open_pull_request(&backend, target(), None).unwrap();
+
+        assert_eq!(opened.details.base_sha, "1234567890abcdef");
+        assert!(!opened.pr_info.base_sha_confirmed);
     }
 
     /// Fake forge whose calls each sleep for `delay`, recording the call
@@ -868,6 +882,7 @@ rename to new_name.rs
         let mut pr_info = backend.get_pull_request_info(target)?;
         if let Some(base_sha) = backend.resolve_diff_base_sha(&pr_info.details) {
             pr_info.details.base_sha = base_sha;
+            pr_info.base_sha_confirmed = true;
         }
         let details = pr_info.details.clone();
         let patches = backend.get_pull_request_diff(&details)?;

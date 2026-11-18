@@ -295,7 +295,7 @@ fn summary_lines(app: &App, pending: &[PendingComment<'_>], width: usize) -> Sum
             ));
         }
         push_wrapped_header(&mut lines, header, width, idx);
-        push_comment_body(&mut lines, &item.comment.content, width, idx);
+        push_comment_body(&mut lines, &item.comment.display_content(), width, idx);
         comment_ranges.push((start_line, lines.len()));
         targets.push(item.target.clone());
         comment_ids.push(item.comment.id.clone());
@@ -712,7 +712,7 @@ mod tests {
             &app.comment_types,
             &app.export,
             &app.forge_review_threads,
-            None,
+            crate::output::ExportHeader::default(),
         )
         .unwrap();
         assert!(!exported.contains("REVIEW_DELETE_MARKER"));

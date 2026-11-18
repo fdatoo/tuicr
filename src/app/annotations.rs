@@ -84,10 +84,13 @@ impl App {
     /// - Comments are added/removed
     /// - Diff view mode changes
     pub fn rebuild_annotations(&mut self) {
+        self.sync_companion_review();
         if self.file_line_count_cache.is_empty() {
             self.populate_file_line_count_cache();
         }
 
+        self.comment_navigator_items.take();
+        self.comment_navigator_width.take();
         self.line_annotations.clear();
         self.colored_hunks.clear();
 

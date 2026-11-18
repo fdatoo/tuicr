@@ -1,4 +1,5 @@
 use super::*;
+use crate::review_guide::PrepTarget;
 use crate::review_store::DeleteOutcome;
 
 impl App {
@@ -269,6 +270,8 @@ impl App {
                 Ok(diff_files) => {
                     self.diff_files = diff_files;
                     self.diff_source = DiffSource::StagedAndUnstaged;
+                    self.invalidate_companion_diff();
+                    self.applied_local_subset = None;
 
                     // Update session for new files
                     for file in &self.diff_files {
@@ -285,6 +288,17 @@ impl App {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn showing_target_selector(&self) -> bool {
+        self.input_mode == InputMode::CommitSelect
+            || (self.input_mode == InputMode::Confirm
+                && self.pending_confirm.map(ConfirmAction::return_mode)
+                    == Some(InputMode::CommitSelect))
+            || (self.input_mode == InputMode::Command
+                && self.command_return_mode == InputMode::CommitSelect)
+            || ((self.input_mode == InputMode::Help || self.searching_help())
+                && self.overlay_return_mode == InputMode::CommitSelect)
     }
 
     /// Switch to the next/previous tab in the review target selector.
@@ -401,6 +415,7 @@ impl App {
         self.sessions_tab
             .set_scope(Self::checkout_display_name(&root));
         self.sessions_tab.apply_load(result);
+        self.refresh_preparation_ui();
     }
 
     /// Whether a listed session holds review progress worth resuming.
@@ -484,7 +499,110 @@ impl App {
     /// `commit_range`, which is what the user would otherwise have to retype as
     /// `-r` / `-w` flags.
     pub fn sessions_tab_select(&mut self) -> Result<()> {
+        if let Some(target) = self
+            .sessions_tab
+            .cursor_guide()
+            .map(|guide| guide.target.clone())
+        {
+            return match target {
+                PrepTarget::PullRequest {
+                    repository,
+                    number,
+                    head_sha,
+                } => {
+                    self.resume_pr_session(&crate::forge::traits::PrSessionKey {
+                        repository,
+                        number,
+                        head_sha,
+                    });
+                    Ok(())
+                }
+                PrepTarget::Local {
+                    repo_root,
+                    source,
+                    commits,
+                    path_filter,
+                    revision,
+                } => self.with_local_vcs(|app| {
+                    if app.vcs_info.root_path != repo_root {
+                        return Err(TuicrError::InvalidInput(
+                            "Review guide belongs to another checkout".into(),
+                        ));
+                    }
+                    let previous_path = std::mem::replace(&mut app.path_filter, path_filter);
+                    let previous_start = std::mem::replace(
+                        &mut app.commit_selection_start,
+                        CommitSelectionStart::All,
+                    );
+                    let opened = app.open_local_preparation(source, commits, revision);
+                    app.commit_selection_start = previous_start;
+                    if !matches!(opened, Ok(true)) {
+                        app.path_filter = previous_path;
+                    }
+                    opened.map(|_| ())
+                }),
+            };
+        }
         self.with_local_vcs(Self::sessions_tab_select_inner)
+    }
+
+    fn open_local_preparation(
+        &mut self,
+        source: SessionDiffSource,
+        ids: Vec<String>,
+        revision: Option<(Option<String>, String)>,
+    ) -> Result<bool> {
+        match source {
+            SessionDiffSource::WorkingTree => self.load_working_tree_selection(),
+            SessionDiffSource::Unstaged => self.load_unstaged_selection(),
+            SessionDiffSource::Staged => self.load_staged_selection(),
+            SessionDiffSource::StagedAndUnstaged => self.load_staged_and_unstaged_selection(),
+            SessionDiffSource::CommitRange
+            | SessionDiffSource::WorkingTreeAndCommits
+            | SessionDiffSource::StagedUnstagedAndCommits => {
+                if ids.is_empty() {
+                    return Err(TuicrError::InvalidInput(
+                        "Review guide has no saved commits".into(),
+                    ));
+                }
+                let commits = self.resolve_session_commits(&ids)?.ok_or_else(|| {
+                    TuicrError::InvalidInput(
+                        "One or more commits in the review guide are unavailable".into(),
+                    )
+                })?;
+                if source == SessionDiffSource::CommitRange {
+                    self.load_commit_range_selection(ids, commits, revision)
+                } else {
+                    self.load_working_tree_and_commits(ids, commits)
+                }
+            }
+            SessionDiffSource::File
+            | SessionDiffSource::Pristine
+            | SessionDiffSource::PullRequest => Err(TuicrError::InvalidInput(
+                "Review guide has an invalid local target".into(),
+            )),
+        }
+    }
+
+    fn load_working_tree_and_commits(
+        &mut self,
+        ids: Vec<String>,
+        mut commits: Vec<CommitInfo>,
+    ) -> Result<bool> {
+        // Restore synthetic entries oldest-first so they end up on top.
+        let change_status = Self::get_change_status_with_ignore(
+            self.vcs.as_ref(),
+            &self.vcs_info.root_path,
+            self.theme.syntax_highlighter(),
+            self.path_filter.as_deref(),
+        )?;
+        if change_status.staged {
+            commits.push(Self::staged_commit_entry());
+        }
+        if change_status.unstaged {
+            commits.push(Self::unstaged_commit_entry());
+        }
+        self.load_staged_unstaged_and_commits_selection(ids, commits)
     }
 
     fn sessions_tab_select_inner(&mut self) -> Result<()> {
@@ -508,7 +626,7 @@ impl App {
                     return Ok(());
                 };
                 let ordered_ids = commits.iter().map(|c| c.id.clone()).collect();
-                self.load_commit_range_selection(ordered_ids, commits)
+                self.load_commit_range_selection(ordered_ids, commits, None)
             }
             SessionDiffSource::WorkingTree => self.load_working_tree_selection(),
             SessionDiffSource::Unstaged => self.load_unstaged_selection(),
@@ -520,23 +638,7 @@ impl App {
                     return Ok(());
                 };
                 let ordered_ids = commits.iter().map(|c| c.id.clone()).collect();
-                // The selector rows are not part of the stored range. Restore
-                // them, oldest-first like the commits, so they end up on top.
-                let mut commits = commits;
-                let highlighter = self.theme.syntax_highlighter();
-                let change_status = Self::get_change_status_with_ignore(
-                    self.vcs.as_ref(),
-                    &self.vcs_info.root_path,
-                    highlighter,
-                    self.path_filter.as_deref(),
-                )?;
-                if change_status.staged {
-                    commits.push(Self::staged_commit_entry());
-                }
-                if change_status.unstaged {
-                    commits.push(Self::unstaged_commit_entry());
-                }
-                self.load_staged_unstaged_and_commits_selection(ordered_ids, commits)
+                self.load_working_tree_and_commits(ordered_ids, commits)
             }
             SessionDiffSource::Pristine => {
                 self.set_message("Restart tuicr with --all-files to open this review.");
@@ -606,6 +708,7 @@ impl App {
     /// loader just resolved so reviewed state and comments still line up.
     fn install_resumed_session(&mut self, session: ReviewSession) -> Result<()> {
         self.session = session;
+        self.invalidate_companion_diff();
         let diff_files = std::mem::take(&mut self.diff_files);
         for file in &diff_files {
             self.session.add_diff_file(file);
@@ -632,6 +735,7 @@ impl App {
     /// Toggle the inline commit selector's visibility. When hiding it while it
     /// is focused, move focus back to the diff so input keeps flowing.
     pub fn toggle_commit_selector(&mut self) {
+        self.keep_guide_stop_in_view();
         let visible = !self.show_commit_selector;
         self.show_commit_selector = visible;
         if !visible && self.focused_panel == FocusedPanel::CommitSelector {
@@ -1047,7 +1151,7 @@ impl App {
             return self.load_unstaged_selection().map(|_| ());
         }
 
-        self.load_commit_range_selection(selected_ids, selected_commits)
+        self.load_commit_range_selection(selected_ids, selected_commits, None)
             .map(|_| ())
     }
 
@@ -1058,13 +1162,18 @@ impl App {
         &mut self,
         selected_ids: Vec<String>,
         selected_commits: Vec<CommitInfo>,
+        revision: Option<(Option<String>, String)>,
     ) -> Result<bool> {
         // Get the diff for the selected commits
+        let diff_target = revision.map_or(RevisionDiffTarget::CommitList, |(base, head)| {
+            RevisionDiffTarget::Explicit { base, head }
+        });
+        let range = ResolvedRevisionRange::from_commit_ids(&selected_ids, diff_target);
         let highlighter = self.theme.syntax_highlighter();
         let diff_files = match Self::get_commit_range_diff_with_ignore(
             self.vcs.as_ref(),
             &self.vcs_info.root_path,
-            &ResolvedRevisionRange::from_commit_ids(&selected_ids, RevisionDiffTarget::CommitList),
+            &range,
             highlighter,
             self.path_filter.as_deref(),
         ) {
@@ -1087,6 +1196,15 @@ impl App {
 
         // Update app state
         self.diff_files = diff_files;
+        self.revision_range = match range.diff_target {
+            RevisionDiffTarget::Explicit { .. } => {
+                Some(ResolvedRevisionRange::from_owned_commit_ids(
+                    selected_ids.clone(),
+                    range.diff_target,
+                ))
+            }
+            RevisionDiffTarget::CommitList => None,
+        };
         self.diff_source = DiffSource::CommitRange(selected_ids);
         self.input_mode = InputMode::Normal;
 
@@ -1119,6 +1237,9 @@ impl App {
     /// Reload the diff for the currently selected inline commit subrange.
     pub fn reload_inline_selection(&mut self) -> Result<()> {
         let Some((start, end)) = self.commit_selection_range else {
+            // The diff stays put, but removing the selection makes every
+            // commit-scoped comment visible in its annotation stream again.
+            self.rebuild_annotations();
             self.set_message("Select at least one commit");
             return Ok(());
         };
@@ -1155,6 +1276,9 @@ impl App {
         };
 
         self.diff_files = diff_files;
+        self.applied_local_subset =
+            Self::is_strict_commit_selection(Some((start, end)), self.review_commits.len())
+                .then(|| Self::source_for_commit_subrange(&self.review_commits, start, end));
 
         // Register the files in the session. `r`, `R` and the comment path all
         // look a file up here, so a file reachable only through a narrowed

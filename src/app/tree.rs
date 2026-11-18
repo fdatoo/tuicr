@@ -82,6 +82,7 @@ impl App {
             self.set_message("side-by-side not available in pristine mode");
             return;
         }
+        self.keep_guide_stop_in_view();
         self.diff_view_mode = match self.diff_view_mode {
             DiffViewMode::Unified => DiffViewMode::SideBySide,
             DiffViewMode::SideBySide => DiffViewMode::Unified,
@@ -95,6 +96,7 @@ impl App {
     }
 
     pub fn toggle_file_list(&mut self) {
+        self.keep_guide_stop_in_view();
         self.show_file_list = !self.show_file_list;
         if !self.show_file_list
             && matches!(
@@ -117,6 +119,7 @@ impl App {
     /// concatenation. Annotations, navigation, and export work the same
     /// way on the rendered subset.
     pub fn toggle_single_file_view(&mut self) {
+        self.keep_guide_stop_in_view();
         self.is_single_file_view = !self.is_single_file_view;
         self.revealed_reviewed_file = None;
         if !self.is_single_file_view {
@@ -182,6 +185,7 @@ impl App {
         for (_dir, files) in dir_map {
             self.diff_files.extend(files);
         }
+        self.guide_diff_published();
 
         if let Some(path) = current_path
             && let Some(idx) = self

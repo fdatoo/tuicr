@@ -215,6 +215,78 @@ fn test_details(key: &PrSessionKey) -> crate::forge::traits::PullRequestDetails 
     }
 }
 
+#[test]
+fn review_snapshot_tracks_base_certainty_across_same_head_reloads() {
+    use crate::forge::pr_open::OpenedPullRequest;
+    use crate::forge::traits::PullRequestInfo;
+    use crate::model::LineSide;
+
+    let _reviews = TestReviewsDir::new();
+    let key = PrSessionKey {
+        head_sha: "a".repeat(40),
+        ..ghe_key()
+    };
+    let mut app = build_pr_app(pr_session(&key, ""));
+    let mut details = test_details(&key);
+    details.base_sha = "b".repeat(40);
+    let reload = |app: &mut App, base_sha_confirmed| {
+        app.apply_same_head_pr_reload(OpenedPullRequest {
+            details: details.clone(),
+            diff_files: Vec::new(),
+            session: app.session.clone(),
+            key: key.clone(),
+            commits: Vec::new(),
+            review_metadata: Default::default(),
+            pr_info: PullRequestInfo {
+                base_sha_confirmed,
+                ..PullRequestInfo::from_details(details.clone())
+            },
+        });
+    };
+
+    reload(&mut app, true);
+    let old = app.snapshot_request(LineSide::Old);
+    assert_eq!(old.pinned_pr_sha(), Some(details.base_sha.as_str()));
+    let new = app.snapshot_request(LineSide::New);
+    assert_eq!(new.pinned_pr_sha(), Some(key.head_sha.as_str()));
+
+    reload(&mut app, false);
+    let old_after_reload = app.snapshot_request(LineSide::Old);
+    assert_ne!(old_after_reload, old);
+    assert_eq!(old_after_reload.pinned_pr_sha(), None);
+    assert_eq!(app.snapshot_request(LineSide::New), new);
+}
+
+#[test]
+fn review_snapshot_uses_applied_subset_base_certainty_not_cumulative_certainty() {
+    use crate::app::PrRangeReloadRequest;
+    use crate::model::LineSide;
+
+    let _reviews = TestReviewsDir::new();
+    let key = ghe_key();
+    let mut app = build_pr_app(pr_session(&key, ""));
+    let mut request = PrRangeReloadRequest {
+        repository: key.repository,
+        pr_number: key.number,
+        head_sha: key.head_sha,
+        start_sha: "b".repeat(40),
+        start_sha_confirmed: false,
+        end_sha: "c".repeat(40),
+        range: (1, 1),
+        started_at: std::time::Instant::now(),
+        anchor: None,
+    };
+    app.finish_pr_range_reload(&request, Vec::new()).unwrap();
+    let before = app.snapshot_request(LineSide::Old);
+    assert_eq!(before.pinned_pr_sha(), None);
+
+    request.start_sha_confirmed = true;
+    app.finish_pr_range_reload(&request, Vec::new()).unwrap();
+    let after = app.snapshot_request(LineSide::Old);
+    assert_eq!(after.pinned_pr_sha(), Some(request.start_sha.as_str()));
+    assert_ne!(before, after);
+}
+
 // SessionTargetChanged recovery: a same-head reload re-resolves the cached
 // path, so the next autosave lands in the new file and keeps both drafts.
 #[test]

@@ -22,10 +22,17 @@ use crate::ui::text_utils::{wrap_spans, wrap_spans_lead};
 use crate::ui::{comment_panel, diff_view};
 
 pub(crate) fn annotation_row_height(app: &App, idx: usize) -> usize {
+    annotation_row_height_at_width(app, idx, app.diff_state.viewport_width)
+}
+
+pub(crate) fn annotation_row_height_at_width(
+    app: &App,
+    idx: usize,
+    viewport_width: usize,
+) -> usize {
     if !app.diff_state.wrap_lines {
         return 1;
     }
-    let viewport_width = app.diff_state.viewport_width;
     if viewport_width == 0 {
         return 1;
     }
@@ -925,7 +932,7 @@ mod tests {
         cursor: usize,
         visible: (usize, usize),
     ) -> (Vec<String>, crate::ui::diff_view::ReviewSectionState) {
-        let mut lines = Vec::new();
+        let mut lines = crate::ui::diff_view::DiffRows::new((0, usize::MAX));
         let mut line_idx = 0;
         let state = crate::ui::diff_view::append_review_comments_section(
             app,
@@ -936,7 +943,8 @@ mod tests {
             visible,
         );
         assert_eq!(lines.len(), line_idx, "line_idx tracks rows");
-        (lines.iter().map(row_text).collect(), state)
+        let rows = lines.into_visible(0, line_idx);
+        (rows.iter().map(row_text).collect(), state)
     }
 
     fn section_app() -> App {
@@ -1042,7 +1050,7 @@ mod tests {
     }
 
     fn section_lines(app: &App) -> Vec<ratatui::text::Line<'static>> {
-        let mut lines = Vec::new();
+        let mut lines = crate::ui::diff_view::DiffRows::new((0, usize::MAX));
         let mut line_idx = 0;
         crate::ui::diff_view::append_review_comments_section(
             app,
@@ -1052,7 +1060,7 @@ mod tests {
             60,
             (0, 1000),
         );
-        lines
+        lines.into_visible(0, line_idx)
     }
 
     #[test]
@@ -1746,7 +1754,7 @@ mod tests {
             .file_comments[0];
         app.editing_comment_id = Some(comment.id.clone());
         app.comment_buffer = "edited file comment".to_string();
-        let mut lines = Vec::new();
+        let mut lines = crate::ui::diff_view::DiffRows::new((0, usize::MAX));
         let mut line_idx = 0;
         let mut input = crate::ui::diff_view::ReviewSectionState::default();
         crate::ui::diff_view::append_file_preamble(
@@ -1768,14 +1776,14 @@ mod tests {
             input.cursor_logical_line.is_some(),
             "editing a file comment must place its cursor"
         );
+        let rows = lines.into_visible(0, line_idx);
         assert!(
-            lines
-                .iter()
+            rows.iter()
                 .map(row_text)
                 .any(|s| s.contains("edited file comment"))
         );
         assert!(
-            !lines
+            !rows
                 .iter()
                 .map(row_text)
                 .any(|s| s.contains("overall the file looks good"))
@@ -1806,7 +1814,7 @@ mod tests {
         let mut file = app.diff_files[idx].clone();
         file.hunks[1].new_start =
             file.hunks[0].new_start + file.hunks[0].new_count + crate::app::GAP_EXPAND_BATCH as u32;
-        let mut lines = Vec::new();
+        let mut lines = crate::ui::diff_view::DiffRows::new((0, usize::MAX));
         let mut line_idx = 0;
         crate::ui::diff_view::append_gap_and_hunk_header(
             &app,
@@ -1836,7 +1844,7 @@ mod tests {
         let last = file.hunks.last().unwrap();
         app.file_line_count_cache
             .insert(idx, last.new_start + last.new_count);
-        let mut lines = Vec::new();
+        let mut lines = crate::ui::diff_view::DiffRows::new((0, usize::MAX));
         let mut line_idx = 0;
         crate::ui::diff_view::append_eof_gap(
             &app,
@@ -1850,7 +1858,7 @@ mod tests {
         );
         assert_eq!(line_idx, 1, "one trailing source line must be expandable");
         assert_eq!(lines.len(), 1);
-        assert!(row_text(&lines[0]).contains("expand"));
+        assert!(row_text(lines.get(0).unwrap()).contains("expand"));
     }
 
     // ---- HABIT 4: remaining preamble / gap / hunk-header / EOF guards ----
@@ -1866,7 +1874,7 @@ mod tests {
         crate::ui::diff_view::ReviewSectionState,
         crate::ui::diff_view::FileBody,
     ) {
-        let mut lines = Vec::new();
+        let mut lines = crate::ui::diff_view::DiffRows::new((0, usize::MAX));
         let mut line_idx = 0;
         let mut input = crate::ui::diff_view::ReviewSectionState::default();
         let body = crate::ui::diff_view::append_file_preamble(
@@ -1880,7 +1888,8 @@ mod tests {
             visible,
             &mut input,
         );
-        (lines.iter().map(row_text).collect(), line_idx, input, body)
+        let rows = lines.into_visible(0, line_idx);
+        (rows.iter().map(row_text).collect(), line_idx, input, body)
     }
 
     fn code_idx(app: &App) -> usize {
@@ -2046,7 +2055,7 @@ mod tests {
     }
 
     fn gap_rows(app: &App, file: &DiffFile, idx: usize, hunk_idx: usize) -> (usize, bool) {
-        let mut lines = Vec::new();
+        let mut lines = crate::ui::diff_view::DiffRows::new((0, usize::MAX));
         let mut line_idx = 0;
         let collapsed = crate::ui::diff_view::append_gap_and_hunk_header(
             app,
@@ -2085,7 +2094,7 @@ mod tests {
         let last = file.hunks.last().unwrap();
         let eof_start = last.new_start + last.new_count;
         let rows = |app: &App| {
-            let mut lines = Vec::new();
+            let mut lines = crate::ui::diff_view::DiffRows::new((0, usize::MAX));
             let mut line_idx = 0;
             crate::ui::diff_view::append_eof_gap(
                 app,
@@ -2117,7 +2126,7 @@ mod tests {
         app.file_line_count_cache
             .insert(idx, last.new_start + last.new_count + 50);
         file.status = FileStatus::Deleted;
-        let mut lines = Vec::new();
+        let mut lines = crate::ui::diff_view::DiffRows::new((0, usize::MAX));
         let mut line_idx = 0;
         crate::ui::diff_view::append_eof_gap(
             &app,

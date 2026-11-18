@@ -1,4 +1,4 @@
-use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
 
 use crate::app::{
@@ -8,6 +8,7 @@ use crate::app::{
 use crate::error::TuicrError;
 use crate::forge::remote_comments::PrCommentsVisibility;
 use crate::forge::submit::SubmitEvent;
+use crate::input::keybindings::map_review_guide_key;
 use crate::input::{
     Action, map_file_picker_filter_mode, map_file_tree_mode_with_q_quits,
     map_file_tree_prompt_mode, map_global_key, map_key_to_action_with_q_quits,
@@ -15,7 +16,8 @@ use crate::input::{
 };
 use crate::model::{ClearScope, LineSide};
 use crate::output::{
-    copy_text_to_clipboard, export_to_clipboard, export_to_file, generate_export_content,
+    ExportHeader, copy_text_to_clipboard, export_to_clipboard, export_to_file,
+    generate_export_content,
 };
 use crate::text_edit::{
     delete_char_before, delete_word_before, next_char_boundary, prev_char_boundary,
@@ -102,6 +104,17 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     CommandSpec::new(&["submit draft"], CommandKind::Submit(SubmitEvent::Draft)),
     CommandSpec::new(&["summary"], CommandKind::Summary),
+    CommandSpec::new(&["guide"], CommandKind::Guide),
+    CommandSpec::new(&["guide off"], CommandKind::GuideOff),
+    CommandSpec::new(&["guide detail"], CommandKind::GuideDetail),
+    CommandSpec::new(&["changes"], CommandKind::Changes),
+    CommandSpec::new(&["map"], CommandKind::Map),
+    CommandSpec::new(&["spot"], CommandKind::SpotCheck),
+    CommandSpec::new(&["coverage"], CommandKind::Coverage),
+    CommandSpec::new(&["prepare"], CommandKind::Prepare),
+    CommandSpec::new(&["prepare cancel"], CommandKind::PrepareCancel),
+    CommandSpec::new(&["ask"], CommandKind::Ask(false)),
+    CommandSpec::new(&["ask history"], CommandKind::Ask(true)),
     CommandSpec::new(&["theme"], CommandKind::ThemePicker),
     CommandSpec::new(
         &["comments unresolved"],
@@ -148,6 +161,7 @@ enum CommandKind {
     Help,
     MessageDetails,
     Summary,
+    Ask(bool),
     Version,
     Update,
     SetWrap,
@@ -164,6 +178,15 @@ enum CommandKind {
     Focus,
     Stage,
     Targets(TargetTab),
+    Guide,
+    GuideOff,
+    GuideDetail,
+    Changes,
+    Map,
+    SpotCheck,
+    Coverage,
+    Prepare,
+    PrepareCancel,
     SubmitPicker,
     Submit(SubmitEvent),
     Comments(PrCommentsVisibility),
@@ -207,8 +230,45 @@ pub fn map_normal_path_key(app: &App, key: KeyEvent) -> Action {
         map_theme_picker_filter_mode(key)
     } else if app.input_mode == InputMode::FilePicker && app.file_picker_filtering() {
         map_file_picker_filter_mode(key)
-    } else if app.input_mode == InputMode::Normal && app.focused_panel == FocusedPanel::FileList {
-        map_file_tree_mode_with_q_quits(key, app.leader_key, app.q_quits)
+    } else if app.input_mode == InputMode::SubmitConfirm
+        && key.code == KeyCode::Enter
+        && app.submit_unverified_risks() > 0
+    {
+        Action::None
+    } else if app.input_mode == InputMode::Normal {
+        if key.code == KeyCode::Esc && key.modifiers.is_empty() && app.spot_position().is_some() {
+            return Action::ExitMode;
+        }
+        let diff_focused = app.focused_panel == FocusedPanel::Diff;
+        let sidebar_focused = app.focused_panel == FocusedPanel::FileList;
+        let map_focused = sidebar_focused && app.showing_review_map();
+        if diff_focused
+            && matches!(key.code, KeyCode::Char('v' | 'V'))
+            && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+        {
+            return Action::EnterVisualMode;
+        }
+        let action = if sidebar_focused && !map_focused {
+            map_file_tree_mode_with_q_quits(key, app.leader_key, app.q_quits)
+        } else {
+            map_key_to_action_with_q_quits(key, app.input_mode, app.leader_key, app.q_quits)
+        };
+        if action != Action::None {
+            return action;
+        }
+        if sidebar_focused
+            && !map_focused
+            && app.active_guide().is_some()
+            && key.code == KeyCode::Char('t')
+            && key.modifiers.is_empty()
+        {
+            return Action::GuideToggleMap;
+        }
+        if map_focused || (diff_focused && app.guide_keys_available()) {
+            map_review_guide_key(key, map_focused)
+        } else {
+            Action::None
+        }
     } else {
         map_key_to_action_with_q_quits(key, app.input_mode, app.leader_key, app.q_quits)
     }
@@ -217,8 +277,11 @@ pub fn map_normal_path_key(app: &App, key: KeyEvent) -> Action {
 /// Route an action to the handler for the current input mode.
 pub fn dispatch_action(app: &mut App, action: Action) {
     match app.input_mode {
-        InputMode::Help | InputMode::MessageDetails => handle_help_action(app, action),
+        InputMode::Help | InputMode::MessageDetails | InputMode::GuideDetails => {
+            handle_help_action(app, action);
+        }
         InputMode::Summary => handle_summary_action(app, action),
+        InputMode::Coverage => handle_coverage_action(app, action),
         InputMode::Command => handle_command_action(app, action),
         InputMode::Search => handle_search_action(app, action),
         InputMode::Comment => handle_comment_action(app, action),
@@ -230,7 +293,32 @@ pub fn dispatch_action(app: &mut App, action: Action) {
         InputMode::SubmitActionPicker => handle_submit_action_picker_action(app, action),
         InputMode::ThemePicker => handle_theme_picker_action(app, action),
         InputMode::FilePicker => handle_file_picker_action(app, action),
+        InputMode::Companion => app.handle_companion_action(action),
         InputMode::Normal => handle_normal_action(app, action),
+    }
+}
+
+fn handle_coverage_action(app: &mut App, action: Action) {
+    let page = app
+        .diff_state
+        .viewport_height
+        .max(1)
+        .min(isize::MAX as usize) as isize;
+    match action {
+        Action::ToggleHelp => app.input_mode = InputMode::Normal,
+        Action::CursorDown(n) | Action::MouseScrollDown(n) => {
+            app.scroll_coverage(n.min(isize::MAX as usize) as isize)
+        }
+        Action::CursorUp(n) | Action::MouseScrollUp(n) => {
+            app.scroll_coverage(-(n.min(isize::MAX as usize) as isize))
+        }
+        Action::HalfPageDown => app.scroll_coverage(page / 2),
+        Action::HalfPageUp => app.scroll_coverage(-page / 2),
+        Action::PageDown => app.scroll_coverage(page),
+        Action::PageUp => app.scroll_coverage(-page),
+        Action::GoToTop => app.scroll_coverage(isize::MIN),
+        Action::GoToBottom => app.scroll_coverage(isize::MAX),
+        _ => {}
     }
 }
 
@@ -247,26 +335,39 @@ pub fn handle_mouse_event(app: &mut App, event: MouseEvent) {
             let over_file_list = app.file_list_area.is_some_and(|r| r.contains(pos));
             let over_diff = app.diff_area.is_some_and(|r| r.contains(pos));
             let over_commit_list = app.commit_list_inner_area.is_some_and(|r| r.contains(pos));
+            let review_panes = matches!(app.input_mode, InputMode::Normal | InputMode::Companion);
             match app.input_mode {
-                InputMode::Help | InputMode::MessageDetails => handle_help_action(app, action),
+                InputMode::Help | InputMode::MessageDetails | InputMode::GuideDetails => {
+                    handle_help_action(app, action);
+                }
                 InputMode::Summary => handle_summary_action(app, action),
+                InputMode::Coverage => handle_coverage_action(app, action),
+                InputMode::Companion if app.companion.area.is_some_and(|r| r.contains(pos)) => {
+                    app.handle_companion_action(action);
+                }
                 InputMode::ThemePicker => {
                     app.move_theme_picker_selection(if scroll_up { -1 } else { 1 });
                 }
                 InputMode::FilePicker => {
                     app.move_file_picker_selection(if scroll_up { -1 } else { 1 });
                 }
-                InputMode::CommitSelect | InputMode::Normal if over_commit_list => {
+                _ if (review_panes || app.input_mode == InputMode::CommitSelect)
+                    && over_commit_list =>
+                {
                     wheel_commit_list(app, scroll_up);
                 }
-                InputMode::Normal if over_file_list => handle_file_list_action(app, action),
-                InputMode::Normal
-                    if app.comment_navigator_area.is_some_and(|r| r.contains(pos)) =>
+                _ if review_panes && over_file_list && app.showing_review_map() => {
+                    handle_review_map_action(app, action);
+                }
+                _ if review_panes && over_file_list => handle_file_list_action(app, action),
+                _ if review_panes
+                    && app.comment_navigator_area.is_some_and(|r| r.contains(pos)) =>
                 {
                     handle_comment_navigator_action(app, action)
                 }
-                InputMode::Normal if over_diff => handle_diff_action(app, action),
-                InputMode::VisualSelect if over_diff => handle_diff_action(app, action),
+                _ if (review_panes || app.input_mode == InputMode::VisualSelect) && over_diff => {
+                    handle_diff_action(app, action);
+                }
                 _ => {}
             }
             clear_visual_if_cursor_offscreen(app);
@@ -277,7 +378,12 @@ pub fn handle_mouse_event(app: &mut App, event: MouseEvent) {
             // (FEAT-0012) or abort an active VisualSelect.
             let scroll_left = matches!(event.kind, MouseEventKind::ScrollLeft);
             let over_diff = app.diff_area.is_some_and(|r| r.contains(pos));
-            if over_diff && matches!(app.input_mode, InputMode::Normal | InputMode::VisualSelect) {
+            if over_diff
+                && matches!(
+                    app.input_mode,
+                    InputMode::Normal | InputMode::VisualSelect | InputMode::Companion
+                )
+            {
                 if scroll_left {
                     app.scroll_left(WHEEL_COLS);
                 } else {
@@ -385,11 +491,11 @@ pub fn clear_visual_if_cursor_offscreen(app: &mut App) {
 /// The list is short and selection-oriented, so each tick moves the cursor
 /// rather than the viewport, matching how arrow keys behave.
 fn wheel_commit_list(app: &mut App, scroll_up: bool) {
-    // Match screen direction: the inline pane (Normal mode) reverses its
-    // display in ascending order, so wheel-up moves toward newer (lower) data
+    // Match screen direction: the inline pane reverses its display in
+    // ascending order, so wheel-up moves toward newer (lower) data
     // indices there. The full-screen picker (CommitSelect) is always
     // newest-first.
-    let scroll_up = if app.input_mode == InputMode::Normal && app.commits_ascending() {
+    let scroll_up = if app.input_mode != InputMode::CommitSelect && app.commits_ascending() {
         !scroll_up
     } else {
         scroll_up
@@ -404,6 +510,9 @@ fn wheel_commit_list(app: &mut App, scroll_up: bool) {
 }
 
 fn handle_left_click(app: &mut App, pos: Position) {
+    if app.showing_review_map() && app.click_guide_map(pos) {
+        return;
+    }
     if app.file_list_inner_area.is_some_and(|r| r.contains(pos))
         && let Some(idx) = app.file_list_idx_at_screen_row(pos.y)
     {
@@ -469,6 +578,11 @@ fn handle_copy_pr_url(app: &mut App) {
 /// When output_to_stdout is true, stores the content and sets should_quit.
 fn handle_export(app: &mut App) {
     let slug = app.session_slug();
+    let note = app.coverage_record().map(|record| record.note());
+    let header = ExportHeader {
+        session_slug: slug.as_deref(),
+        coverage_note: note.as_deref(),
+    };
     if app.output_to_stdout {
         match generate_export_content(
             &app.session,
@@ -476,7 +590,7 @@ fn handle_export(app: &mut App) {
             &app.comment_types,
             &app.export,
             &app.forge_review_threads,
-            slug.as_deref(),
+            header,
         ) {
             Ok(content) => {
                 app.pending_stdout_output = Some(content);
@@ -491,7 +605,7 @@ fn handle_export(app: &mut App) {
             &app.comment_types,
             &app.export,
             &app.forge_review_threads,
-            slug.as_deref(),
+            header,
         ) {
             Ok(msg) => app.set_message(msg),
             Err(e) => app.set_warning(format!("{e}")),
@@ -518,13 +632,17 @@ fn handle_export_to_file(app: &mut App, path: &str) {
         None => path.into(),
     };
     let slug = app.session_slug();
+    let note = app.coverage_record().map(|record| record.note());
     match export_to_file(
         &app.session,
         &app.diff_source,
         &app.comment_types,
         &app.export,
         &app.forge_review_threads,
-        slug.as_deref(),
+        ExportHeader {
+            session_slug: slug.as_deref(),
+            coverage_note: note.as_deref(),
+        },
         &path,
     ) {
         Ok(msg) => app.set_message(msg),
@@ -968,12 +1086,7 @@ fn dispatch_command(app: &mut App, kind: CommandKind) -> CommandAfterDispatch {
             CommandAfterDispatch::ExitCommandMode
         }
         CommandKind::Write => {
-            match app.save_current_session_merging_external() {
-                Ok(path) => {
-                    app.set_message(format!("Saved to {}", path.display()));
-                }
-                Err(e) => app.set_error(format!("Save failed: {e}")),
-            }
+            app.write_current_review();
             CommandAfterDispatch::ExitCommandMode
         }
         CommandKind::WriteQuit => {
@@ -1033,6 +1146,47 @@ fn dispatch_command(app: &mut App, kind: CommandKind) -> CommandAfterDispatch {
             // the common post-dispatch cleanup cannot clobber Summary.
             app.exit_command_mode();
             app.enter_summary_mode();
+            CommandAfterDispatch::KeepMode
+        }
+        CommandKind::Guide => {
+            app.exit_command_mode();
+            app.enter_guide();
+            CommandAfterDispatch::KeepMode
+        }
+        CommandKind::GuideOff => {
+            app.pause_guide();
+            CommandAfterDispatch::ExitCommandMode
+        }
+        CommandKind::GuideDetail => {
+            app.exit_command_mode();
+            app.open_guide_details();
+            CommandAfterDispatch::KeepMode
+        }
+        CommandKind::Changes => {
+            app.exit_command_mode();
+            app.enter_changed_story();
+            CommandAfterDispatch::KeepMode
+        }
+        CommandKind::Map => {
+            app.toggle_review_map();
+            CommandAfterDispatch::ExitCommandMode
+        }
+        CommandKind::SpotCheck | CommandKind::Coverage => {
+            app.exit_command_mode();
+            if kind == CommandKind::SpotCheck {
+                app.start_spot_check();
+            } else {
+                app.open_coverage();
+            }
+            CommandAfterDispatch::KeepMode
+        }
+        CommandKind::Prepare | CommandKind::PrepareCancel => {
+            app.exit_command_mode();
+            if kind == CommandKind::Prepare {
+                app.start_preparation();
+            } else {
+                app.cancel_preparation();
+            }
             CommandAfterDispatch::KeepMode
         }
         CommandKind::ThemePicker => {
@@ -1128,6 +1282,15 @@ fn dispatch_command(app: &mut App, kind: CommandKind) -> CommandAfterDispatch {
             app.start_submit(event);
             CommandAfterDispatch::KeepMode
         }
+        CommandKind::Ask(history) => {
+            app.exit_command_mode();
+            if history {
+                app.open_companion(true);
+            } else {
+                app.open_companion_command();
+            }
+            CommandAfterDispatch::KeepMode
+        }
         CommandKind::Comments(visibility) => {
             set_remote_comments_visibility(app, visibility);
             CommandAfterDispatch::ExitCommandMode
@@ -1148,7 +1311,7 @@ fn reload_review(app: &mut App) {
             app.set_error(format!("Reload failed: {e}"));
         }
     } else {
-        match app.reload_diff_files() {
+        match app.reload_diff_view() {
             Ok((count, invalidated)) => {
                 let comment_suffix = match comment_reload {
                     Ok(added) if added > 0 => {
@@ -1194,6 +1357,7 @@ fn check_for_updates(app: &mut App) {
 }
 
 fn set_commit_selector_visible(app: &mut App, visible: bool) {
+    app.keep_guide_stop_in_view();
     app.show_commit_selector = visible;
     if !visible && app.focused_panel == FocusedPanel::CommitSelector {
         app.focused_panel = FocusedPanel::Diff;
@@ -1376,32 +1540,7 @@ pub fn handle_confirm_action(app: &mut App, action: Action) {
                 app.sessions_tab_delete_selected();
             }
             if let Some(app::ConfirmAction::CopyAndQuit) = app.pending_confirm {
-                let slug = app.session_slug();
-                if app.output_to_stdout {
-                    match generate_export_content(
-                        &app.session,
-                        &app.diff_source,
-                        &app.comment_types,
-                        &app.export,
-                        &app.forge_review_threads,
-                        slug.as_deref(),
-                    ) {
-                        Ok(content) => app.pending_stdout_output = Some(content),
-                        Err(e) => app.set_warning(format!("{e}")),
-                    }
-                } else {
-                    match export_to_clipboard(
-                        &app.session,
-                        &app.diff_source,
-                        &app.comment_types,
-                        &app.export,
-                        &app.forge_review_threads,
-                        slug.as_deref(),
-                    ) {
-                        Ok(msg) => app.set_message(msg),
-                        Err(e) => app.set_warning(format!("{e}")),
-                    }
-                }
+                handle_export(app);
             }
             app.exit_confirm_mode();
             app.should_quit = quits;
@@ -1524,6 +1663,8 @@ fn handle_pr_target_action(app: &mut App, action: Action) {
         Action::TogglePrReviewRequestedFilter => {
             app.toggle_pr_review_requested_filter();
         }
+        Action::PrepareSelectedPr => app.prepare_selected_pr(),
+        Action::CancelSelectedPrPreparation => app.cancel_selected_pr_preparation(),
         _ => {}
     }
 }
@@ -1612,6 +1753,7 @@ pub fn handle_visual_action(app: &mut App, action: Action) {
                 app.exit_visual_mode();
             }
         }
+        Action::OpenCompanion => app.open_companion(false),
         Action::ExportToClipboard => {
             match app.copy_visual_selection() {
                 Ok(0) => app.set_message("Nothing to copy"),
@@ -1641,11 +1783,33 @@ pub fn handle_normal_action(app: &mut App, action: Action) {
     if app.file_tree_prompt_editing() {
         return handle_file_list_action(app, action);
     }
+    if action == Action::ExitMode && app.spot_position().is_some() {
+        app.stop_spot_check();
+        return;
+    }
     match app.focused_panel {
+        FocusedPanel::FileList if app.showing_review_map() => handle_review_map_action(app, action),
         FocusedPanel::FileList => handle_file_list_action(app, action),
         FocusedPanel::Comments => handle_comment_navigator_action(app, action),
         FocusedPanel::Diff => handle_diff_action(app, action),
         FocusedPanel::CommitSelector => handle_commit_selector_action(app, action),
+    }
+}
+
+fn handle_review_map_action(app: &mut App, action: Action) {
+    match action {
+        Action::CursorDown(lines) | Action::MouseScrollDown(lines) => {
+            app.move_guide_map_selection(lines.min(isize::MAX as usize) as isize);
+        }
+        Action::CursorUp(lines) | Action::MouseScrollUp(lines) => {
+            app.move_guide_map_selection(-(lines.min(isize::MAX as usize) as isize));
+        }
+        Action::GoToTop => app.move_guide_map_selection(isize::MIN),
+        Action::GoToBottom => app.move_guide_map_selection(isize::MAX),
+        Action::SelectFile => app.enter_guide_map_selection(),
+        Action::GuideDismissGroup => app.dismiss_guide_group(),
+        Action::GuideToggleMap => app.toggle_review_map(),
+        _ => handle_shared_normal_action(app, action),
     }
 }
 
@@ -1655,6 +1819,7 @@ pub fn handle_paste(app: &mut App, text: String) {
     let action = Action::Paste(text);
     match app.input_mode {
         InputMode::Comment => handle_comment_action(app, action),
+        InputMode::Companion => app.handle_companion_action(action),
         InputMode::Command => handle_command_action(app, action),
         InputMode::Search => handle_search_action(app, action),
         InputMode::CommitSelect if app.pr_filter_editing() => {
@@ -1685,6 +1850,7 @@ pub fn handle_file_list_action(app: &mut App, action: Action) {
         return;
     }
     match action {
+        Action::GuideToggleMap => app.toggle_review_map(),
         Action::FileTreeFilterInclude => app.begin_file_tree_prompt(FileTreePrompt::Include),
         Action::FileTreeFilterExclude => app.begin_file_tree_prompt(FileTreePrompt::Exclude),
         Action::FileTreeClearInclude => app.clear_include_filter(),
@@ -1825,6 +1991,7 @@ pub fn handle_comment_navigator_action(app: &mut App, action: Action) {
         Action::ScrollRight(n) => app.comment_navigator_state.scroll_right(n),
         Action::MouseScrollDown(n) => app.comment_navigator_viewport_scroll_down(n),
         Action::MouseScrollUp(n) => app.comment_navigator_viewport_scroll_up(n),
+        Action::OpenCompanion => app.open_companion(false),
         Action::SelectFile => {
             app.jump_to_selected_comment();
         }
@@ -1862,6 +2029,14 @@ pub fn handle_diff_action(app: &mut App, action: Action) {
         Action::ScrollRight(n) => app.scroll_right(n),
         Action::MouseScrollDown(n) => app.scroll_view_down(n),
         Action::MouseScrollUp(n) => app.scroll_view_up(n),
+        Action::OpenCompanion => app.open_companion(false),
+        Action::GuidePrimary => app.guide_primary_key(false),
+        Action::GuideExplicit => app.guide_primary_key(true),
+        Action::GuideWrong => app.open_wrong_guide_comment(),
+        Action::GuidePark => app.park_guide_stop(),
+        Action::GuidePrevious => app.previous_guide_stop(),
+        Action::GuideReturn => app.return_to_guide_stop(),
+        Action::GuideToggleMap => app.toggle_review_map(),
         Action::SelectFile => {
             if let Some(hit) = app.get_gap_at_cursor() {
                 match hit {
@@ -2087,6 +2262,7 @@ pub fn handle_submit_confirm_action(app: &mut App, action: Action) {
     match action {
         Action::ConfirmYes => app.confirm_submit(),
         Action::ConfirmNo => app.cancel_submit(),
+        Action::EditCoverageNote => app.edit_coverage_note(),
         // Only meaningful when the stale-head warning is visible.
         Action::SubmitReloadPr
             if app.submit_head_is_stale()

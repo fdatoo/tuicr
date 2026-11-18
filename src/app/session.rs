@@ -183,6 +183,13 @@ impl App {
         self.should_quit = true;
     }
 
+    pub(crate) fn write_current_review(&mut self) {
+        match self.save_current_session_merging_external() {
+            Ok(path) => self.set_message(format!("Saved to {}", path.display())),
+            Err(error) => self.set_error(format!("Save failed: {error}")),
+        }
+    }
+
     pub fn save_current_session_merging_external(&mut self) -> Result<PathBuf> {
         let identity = self.session.clone();
         let cached = self.session_path.clone();
@@ -210,6 +217,13 @@ impl App {
         &mut self,
         diff_files: &[DiffFile],
     ) -> Result<()> {
+        self.persist_review_reconciliation(|saved| saved.reconcile_diff_files(diff_files))
+    }
+
+    pub(super) fn persist_review_reconciliation(
+        &mut self,
+        reconcile: impl FnOnce(&mut ReviewSession),
+    ) -> Result<()> {
         let identity = self.session.clone();
         let cached = self.session_path.clone();
         let base = self.persisted_session_snapshot.clone();
@@ -218,7 +232,7 @@ impl App {
             cached.as_deref(),
             |persisted| {
                 let mut saved = persisted.unwrap_or_else(|| base.clone());
-                saved.reconcile_diff_files(diff_files);
+                reconcile(&mut saved);
                 saved.updated_at = Utc::now();
                 Ok((saved, ()))
             },

@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import urllib.parse
+from pathlib import Path
 
 from .core import Fake
 
@@ -163,6 +165,15 @@ def rest(f: Fake, endpoint: str) -> None:
         f.unexpected(f"unexpected {method} to {path}")
     base, _, query = path.partition("?")
     first_page = f.page(query) == "1"
+    if re.fullmatch(r"tarball/[a-f0-9]{40}", base):
+        archive = os.environ.get("E2E_GITHUB_ASK_ARCHIVE")
+        sha = os.environ.get("E2E_GITHUB_ASK_ARCHIVE_SHA")
+        if archive and base == f"tarball/{sha}":
+            sys.stdout.buffer.write(Path(archive).read_bytes())
+            raise SystemExit(0)
+        if archive:
+            f.unexpected("archive requested for the wrong reviewed revision")
+        f.fail("Archive not available (HTTP 404)")
     if re.fullmatch(r"pulls/\d+/files", base):
         f.serve("files.json") if first_page else f.out("[]\n")
     if re.fullmatch(r"pulls/\d+/commits", base):
@@ -177,5 +188,6 @@ def rest(f: Fake, endpoint: str) -> None:
             f.serve(rel)
         f.serve("pr_diff.patch" if diff_req else "compare.json")
     if base.startswith("contents/"):
-        f.serve("contents/" + fixture_name(urllib.parse.unquote(base[len("contents/") :])))
+        rel = urllib.parse.unquote(base[len("contents/") :])
+        f.serve("contents/" + fixture_name(rel))
     f.unexpected("unrecognised REST endpoint " + path)

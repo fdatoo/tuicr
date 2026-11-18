@@ -63,14 +63,14 @@ impl FileStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LineOrigin {
     Context,
     Addition,
     Deletion,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffLine {
     pub origin: LineOrigin,
     pub content: String,
@@ -80,10 +80,11 @@ pub struct DiffLine {
     pub new_lineno: Option<u32>,
     /// Optional syntax-highlighted spans for this line
     /// If None, use the default diff coloring
+    #[serde(skip)]
     pub highlighted_spans: Option<Vec<(Style, String)>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffHunk {
     pub header: String,
     pub lines: Vec<DiffLine>,
@@ -99,7 +100,7 @@ pub struct DiffHunk {
     pub new_count: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffFile {
     pub old_path: Option<PathBuf>,
     pub new_path: Option<PathBuf>,

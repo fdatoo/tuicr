@@ -1478,7 +1478,7 @@ fn comment_navigator_items_follow_rendered_comment_order() {
     }];
     app.rebuild_annotations();
 
-    let items = app.build_comment_navigator_items();
+    let items = app.comment_navigator_items();
 
     assert_eq!(items.len(), 4);
     assert!(matches!(
@@ -1526,7 +1526,7 @@ fn comment_navigator_includes_remote_review_summary() {
     }];
     app.rebuild_annotations();
 
-    let items = app.build_comment_navigator_items();
+    let items = app.comment_navigator_items();
 
     // Summary appears as the first navigator item — review-scope, before files.
     assert!(matches!(
@@ -1560,7 +1560,7 @@ fn jump_to_selected_comment_uses_comment_annotation_target() {
             Some(LineSide::New),
         ));
     app.rebuild_annotations();
-    let items = app.build_comment_navigator_items();
+    let items = app.comment_navigator_items();
     let target = items[0].target_annotation;
     let expected_scroll = target
         .saturating_sub(app.diff_state.viewport_height / 2)

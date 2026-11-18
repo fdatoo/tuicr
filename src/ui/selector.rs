@@ -16,7 +16,7 @@ use crate::ui::commit_row::{
 };
 use crate::ui::status_bar;
 use crate::ui::styles;
-use crate::ui::text_utils::truncate_or_pad;
+use crate::ui::text_utils::{prefix_within_width, truncate_or_pad};
 
 const TAB_LOCAL: &str = "Local";
 const TAB_PULL_REQUESTS: &str = "Pull Requests";
@@ -122,7 +122,12 @@ fn render_top_bar(frame: &mut Frame, app: &App, area: Rect) {
             let count = app.sessions_tab.rows().len();
             // `<n> saved`, not `<n> sessions`: mirrors the PR tab's
             // `<n> loaded` and stays correct at a count of one.
-            let content = format!(" {count} saved ");
+            let guides = app.sessions_tab.guide_rows().len();
+            let content = if guides == 0 {
+                format!(" {count} saved ")
+            } else {
+                format!(" {count} saved · {guides} guides ")
+            };
             let width = content.chars().count();
             (Span::styled(content, strip_style), width)
         }
@@ -289,7 +294,11 @@ fn render_sessions_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    if let Some(error) = app.sessions_tab.error() {
+    if let Some(error) = app
+        .sessions_tab
+        .error()
+        .filter(|_| app.sessions_tab.is_empty())
+    {
         let line = Line::from(vec![
             Span::styled("  error \u{00b7} ", styles::error_inline_style(theme)),
             Span::styled(
@@ -372,6 +381,52 @@ fn render_sessions_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         ]));
     }
 
+    let saved = app.sessions_tab.rows().len();
+    for (i, row) in app
+        .sessions_tab
+        .guide_rows()
+        .iter()
+        .enumerate()
+        .skip(scroll.saturating_sub(saved))
+        .take(height - lines.len())
+    {
+        let selected = saved + i == cursor;
+        let pointer = if selected {
+            format!("{CURSOR_GLYPH} ")
+        } else {
+            "  ".into()
+        };
+        let pointer_style = if selected {
+            styles::selected_style(theme)
+        } else {
+            Style::default().fg(theme.fg_secondary)
+        };
+        let available = (area.width as usize).saturating_sub(10);
+        let status_width = row
+            .label
+            .width()
+            .min(PREPARATION_MAX_WIDTH)
+            .min(available / 2);
+        let title_width = available.saturating_sub(status_width + 2);
+        lines.push(Line::from(vec![
+            Span::styled(
+                pointer,
+                styles::selection_marker_style(theme, pointer_style),
+            ),
+            Span::raw("  "),
+            Span::styled("guide", styles::hash_style(theme)),
+            Span::raw(" "),
+            Span::styled(
+                truncate_or_pad(&row.title, title_width),
+                Style::default().fg(theme.fg_primary),
+            ),
+            Span::styled(
+                right_aligned_preparation(&row.label, status_width),
+                Style::default().fg(theme.fg_secondary),
+            ),
+        ]));
+    }
+
     frame.render_widget(
         Paragraph::new(lines).style(styles::panel_style(theme)),
         area,
@@ -382,6 +437,18 @@ fn render_sessions_tab(frame: &mut Frame, app: &mut App, area: Rect) {
 const PR_ROW_LEAD_WIDTH: usize = 2 + 2 + 6 + 1;
 const PR_TITLE_MIN_WIDTH: usize = 20;
 const PR_AUTHOR_WIDTH: usize = 12;
+const PREPARATION_MAX_WIDTH: usize = 36;
+
+fn right_aligned_preparation(label: &str, width: usize) -> String {
+    let (text, ellipsis) = if label.width() <= width {
+        (label, "")
+    } else {
+        let ellipsis = if width >= 3 { "..." } else { "" };
+        (prefix_within_width(label, width - ellipsis.len()), ellipsis)
+    };
+    let padding = width - text.width() - ellipsis.len() + 2;
+    format!("{:padding$}{text}{ellipsis}", "")
+}
 
 /// The `  author · updated · commit 2mo [draft]` tail of each PR row. The
 /// last-commit part appears only for forges that report it (GitHub); when
@@ -475,15 +542,22 @@ fn render_pr_list(frame: &mut Frame, app: &App, area: Rect, view: &PrTabView<'_>
         .as_ref()
         .map(|s| pr_open_spinner_glyph(s.started_at.elapsed()));
 
-    // Metadata trails the title, so the title column takes the width the
-    // metadata leaves: a wide terminal shows long titles in full, and a
-    // narrow one shrinks the title rather than cutting the dates off. It
-    // stays the same width on every row so the metadata lands at the same x.
+    // Preparation is the trailing slot. Keep a readable title column and
+    // clip long agent reasons before they can swallow the title.
     let metadata: Vec<String> = pr_row_metadata(view);
     let metadata_width = metadata.iter().map(|m| m.width()).max().unwrap_or(0);
-    let title_width = (area.width as usize)
-        .saturating_sub(PR_ROW_LEAD_WIDTH + metadata_width)
-        .max(PR_TITLE_MIN_WIDTH);
+    let available = (area.width as usize).saturating_sub(PR_ROW_LEAD_WIDTH + 2);
+    let status_width = view
+        .rows
+        .iter()
+        .map(|row| app.pr_preparation_label(row.summary.number).width())
+        .max()
+        .unwrap_or(0)
+        .min(PREPARATION_MAX_WIDTH)
+        .min(available / 2);
+    let metadata_width =
+        metadata_width.min(available.saturating_sub(PR_TITLE_MIN_WIDTH + status_width));
+    let title_width = available.saturating_sub(metadata_width + status_width);
 
     let mut lines: Vec<Line> = Vec::new();
     for (i, (row, metadata)) in view.rows.iter().zip(metadata).enumerate() {
@@ -521,7 +595,17 @@ fn render_pr_list(frame: &mut Frame, app: &App, area: Rect, view: &PrTabView<'_>
             Span::styled(number, styles::hash_style(theme)),
             Span::styled(" ", Style::default()),
             Span::styled(title, Style::default().fg(theme.fg_primary)),
-            Span::styled(metadata, Style::default().fg(theme.fg_secondary)),
+            Span::styled(
+                truncate_or_pad(&metadata, metadata_width),
+                Style::default().fg(theme.fg_secondary),
+            ),
+            Span::styled(
+                right_aligned_preparation(
+                    app.pr_preparation_label(row.summary.number),
+                    status_width,
+                ),
+                Style::default().fg(theme.fg_secondary),
+            ),
         ]));
     }
 
@@ -627,7 +711,9 @@ fn render_target_selector_footer(frame: &mut Frame, app: &App, area: Rect) {
                     PullRequestListScope::Open => "r all PRs".to_string(),
                     other => format!("r {}", app.pr_scope_label(other)),
                 };
-                format!("   j/k navigate · ↵ open · {scope_hint} · / filter · esc back")
+                format!(
+                    "   j/k navigate · ↵ open · p prepare · P cancel prep · {scope_hint} · / filter · esc back"
+                )
             }
             TargetTab::Sessions => {
                 let empty_hint = if app.sessions_tab.show_empty() {
@@ -635,7 +721,11 @@ fn render_target_selector_footer(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     "a show empty"
                 };
-                format!("   j/k navigate · ↵ resume · dd delete · {empty_hint} · esc back")
+                if app.sessions_tab.cursor_guide().is_some() {
+                    format!("   j/k navigate · ↵ open guide · {empty_hint} · esc back")
+                } else {
+                    format!("   j/k navigate · ↵ resume · dd delete · {empty_hint} · esc back")
+                }
             }
         }
     };
@@ -802,6 +892,7 @@ mod selector_render_snapshot_tests {
             title: title.to_string(),
             author: Some(author.to_string()),
             head_ref_name: format!("feat/{number}"),
+            head_sha: None,
             base_ref_name: "main".to_string(),
             updated_at: Some(Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap()),
             last_commit_at: None,
@@ -1081,6 +1172,44 @@ mod selector_render_snapshot_tests {
             .map(|y| row_text(buffer, y))
             .find(|row| row.contains(needle))
             .unwrap_or_else(|| panic!("no row contains {needle:?}"))
+    }
+
+    #[test]
+    fn should_align_preparation_status_at_100_columns_without_swallowing_titles() {
+        use crate::review_guide::{GuideStore, PrepState, PrepStatus, ReviewKey};
+
+        let dir = tempfile::tempdir().unwrap();
+        crate::persistence::storage::set_test_reviews_dir(Some(dir.path().into()));
+        let mut app = app_with_prs(vec![
+            pr(148, "A readable PR title", "alice"),
+            pr(125, "Keep this PR title", "bob"),
+        ]);
+        let mut state = PrepState::started("Auditing", None, None);
+        state.status = PrepStatus::Ready;
+        state.stops = Some(11);
+        state.estimate_minutes = Some(12);
+        GuideStore::open(&ReviewKey::for_repository(&repo(), 148))
+            .unwrap()
+            .save_state(&state)
+            .unwrap();
+        state.status = PrepStatus::Failed;
+        state.error = Some("The reviewer requires an account before it can read any source".into());
+        GuideStore::open(&ReviewKey::for_repository(&repo(), 125))
+            .unwrap()
+            .save_state(&state)
+            .unwrap();
+        assert!(app.poll_preparation_ui(false, false));
+
+        let buffer = draw_at(&mut app, 100, 24);
+        let ready = row_containing(&buffer, "#148");
+        let failed = row_containing(&buffer, "#125");
+        assert!(ready.contains("A readable PR title"), "{ready}");
+        assert!(ready.contains("ready · 11 stops · about 12 min"), "{ready}");
+        assert!(failed.contains("Keep this PR title"), "{failed}");
+        assert!(failed.contains("failed · The reviewer"), "{failed}");
+        let right_edge = |row: &str, tail| row[..row.rfind(tail).unwrap()].width();
+        assert_eq!(right_edge(&ready, "min"), right_edge(&failed, "..."));
+        crate::persistence::storage::set_test_reviews_dir(None);
     }
 
     #[test]

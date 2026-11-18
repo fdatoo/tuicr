@@ -196,6 +196,7 @@ impl GhPullRequestInfoResponse {
 
         Ok(PullRequestInfo {
             details,
+            base_sha_confirmed: false,
             review_decision: non_empty(self.review_decision),
             mergeable: non_empty(self.mergeable),
             merge_state: non_empty(self.merge_state_status),

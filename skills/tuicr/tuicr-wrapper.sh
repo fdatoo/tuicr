@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -e -u -o pipefail
 
+# shellcheck source=_tuicr-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_tuicr-common.sh"
 
 # Configuration - override via environment variables
@@ -22,7 +23,7 @@ log_warn() {
 }
 
 log_error() {
-  echo -e "${RED}[tuicr]${NC} $*"
+  echo -e "${RED}[tuicr]${NC} $*" >&2
 }
 
 usage() {
@@ -86,7 +87,7 @@ check_tuicr_running() {
   tmux list-panes -t "$caller_pane" -F '#{pane_current_command}' 2>/dev/null | grep -q '^tuicr$'
 }
 
-launch_tuicr_pane() {
+launch_tuicr_pane() (
   local target_dir="$1"
   shift
   local tuicr_args=("$@")
@@ -123,35 +124,39 @@ launch_tuicr_pane() {
   log_info "Launching tuicr in $TUICR_PANE_POSITION pane of $caller_pane (${pane_lines} lines, ${TUICR_PANE_SIZE}%)"
   log_info "Directory: $target_dir"
 
-  # Create unique channel for wait-for
-  local wait_channel="tuicr-$$"
+  local state_dir wait_channel="tuicr-$$"
+  state_dir=$(mktemp -d /tmp/tuicr-pane.XXXXXX)
+  trap 'rm -rf -- "$state_dir"' EXIT
 
-  # Check if --stdout is supported and set up output capture
-  local output_file=""
-  local tuicr_cmd="tuicr$(tuicr_quote_args "${tuicr_args[@]+"${tuicr_args[@]}"}")"
-  local use_stdout=false
-
+  local tuicr_cmd output_file=""
+  tuicr_cmd=$(tuicr_quote_args "$(command -v tuicr)" "${tuicr_args[@]+"${tuicr_args[@]}"}")
   if tuicr_stdout_supported; then
-    output_file=$(mktemp /tmp/tuicr-output.XXXXXX)
+    output_file="$state_dir/output"
     tuicr_cmd="$tuicr_cmd --stdout > '$output_file'"
-    use_stdout=true
     log_info "Using --stdout mode (output will be captured)"
-  else
-    log_warn "tuicr --stdout not supported, output will be copied to clipboard"
   fi
+
+  # A short-lived pane may be gone by the time split-window returns. Send
+  # its status and diagnostics through a private directory instead of
+  # querying the pane. Write the status before waking the wrapper.
+  local pane_command
+  pane_command="if $tuicr_cmd 2> '$state_dir/stderr'; then status=0; else status=\$?; fi
+    printf '%s\\n' \"\$status\" > '$state_dir/status'
+    $(tuicr_quote_args "$(command -v tmux)" wait-for -S "$wait_channel")"
 
   # Create the split pane with tuicr, signal when done
   # Use -d to not switch, -P to print pane info so we can capture the ID
   local new_pane_id
   new_pane_id=$(tmux split-window -d -P -F '#{pane_id}' -t "$caller_pane" "${split_args[@]}" \
-    "cd '$target_dir' && $tuicr_cmd; tmux wait-for -S '$wait_channel'")
+    bash -c "$pane_command")
 
   # Focus the new pane only when the caller already has focus in its window.
   # If the human is working in another pane, leave them alone — they will
   # come back to the agent's pane (e.g. via its notification) and find the
   # review waiting next to it.
   if [[ "$(tmux display-message -p -t "$caller_pane" '#{pane_active}')" == "1" ]]; then
-    tmux select-pane -t "$new_pane_id"
+    # An immediate startup error may already have closed the new pane.
+    tmux select-pane -t "$new_pane_id" 2>/dev/null || true
   else
     log_info "Caller pane is not focused; leaving focus where it is"
   fi
@@ -162,10 +167,19 @@ launch_tuicr_pane() {
   # Block until tuicr exits
   tmux wait-for "$wait_channel"
 
+  local tuicr_status
+  if ! IFS= read -r tuicr_status < "$state_dir/status" || [[ ! "$tuicr_status" =~ ^[0-9]+$ ]]; then
+    log_error "Could not read tuicr exit status"
+    return 1
+  fi
+  cat "$state_dir/stderr" >&2
+  if (( tuicr_status != 0 )); then
+    log_error "tuicr exited with status $tuicr_status"
+    return "$tuicr_status"
+  fi
   log_info "tuicr finished"
-
-  tuicr_report_stdout_output "$use_stdout" "$output_file"
-}
+  tuicr_report_stdout_output "$output_file" "$target_dir"
+)
 
 main() {
   # Handle help

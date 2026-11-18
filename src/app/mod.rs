@@ -597,8 +597,12 @@ pub enum InputMode {
     Help,
     /// Scrollable full-screen view for the complete current error message.
     MessageDetails,
+    /// Scrollable full text of the current review-guide stop.
+    GuideDetails,
     /// View of the active review's pending local-draft comments.
     Summary,
+    /// Read-only record of review guide coverage.
+    Coverage,
     Confirm,
     CommitSelect,
     VisualSelect,
@@ -621,6 +625,8 @@ pub enum InputMode {
     /// the file-tree filters; `Enter` jumps to the selected one, and `/`
     /// opens a filter draft the same way the theme picker does.
     FilePicker,
+    /// Private question composer and conversation history for the current review.
+    Companion,
 }
 
 /// CommandCompletionState keeps one Tab-completion run anchored to the text
@@ -791,6 +797,7 @@ pub struct SubmitState {
     /// instead of routing through `SubmitConfirm`. Set by the action-picker
     /// path; left `false` for explicit `:submit <event>` invocations.
     pub skip_confirm: bool,
+    pub(crate) guide: Option<submit::GuideSubmission>,
 }
 
 /// Event options shown in the bare-`:submit` action picker, in display
@@ -912,10 +919,19 @@ pub struct PrRangeReloadRequest {
     pub pr_number: u64,
     pub head_sha: String,
     pub start_sha: String,
+    /// False when the range starts at an unconfirmed cumulative branch tip.
+    pub start_sha_confirmed: bool,
     pub end_sha: String,
     pub range: (usize, usize),
     pub started_at: Instant,
     pub anchor: Option<PrCursorAnchor>,
+}
+
+/// The range behind the displayed patches, not the pending selector choice.
+struct AppliedPrRange {
+    start_sha: String,
+    start_sha_confirmed: bool,
+    end_sha: String,
 }
 
 /// Result delivered from the PR range re-fetch background thread.
@@ -1210,6 +1226,8 @@ pub struct App {
 
     pub file_list_state: FileListState,
     pub comment_navigator_state: CommentNavigatorState,
+    comment_navigator_items: std::cell::OnceCell<Vec<CommentNavigatorItem>>,
+    comment_navigator_width: std::cell::OnceCell<usize>,
     pub diff_state: DiffState,
     pub help_state: HelpState,
     pub summary_state: SummaryState,
@@ -1221,6 +1239,8 @@ pub struct App {
     pub theme_picker: ThemePickerState,
     /// `<leader>p` file picker state.
     pub file_picker: FilePickerState,
+    pub(crate) companion: companion::CompanionState,
+    companion_runtime: crate::review_agent::CompanionRuntime,
     pub command_buffer: String,
     pub(crate) command_completion: Option<CommandCompletionState>,
     pub(crate) command_return_mode: InputMode,
@@ -1305,6 +1325,7 @@ pub struct App {
     pub pr_filter_draft: Option<String>,
     /// State for the Sessions tab: persisted reviews for this checkout.
     pub sessions_tab: crate::app::sessions_tab::SessionsTab,
+    preparation_ui: preparation_ui::PreparationUi,
     /// Viewport height of the session list (set during render).
     pub sessions_list_viewport_height: usize,
     /// Background-thread channel that delivers PR list fetch results.
@@ -1488,6 +1509,8 @@ pub struct App {
     /// Source line from `--line`, applied once after the first render
     /// (when the viewport height is known) so the target can be centered.
     pub pending_start_line: Option<u32>,
+    review_map: review_map::ReviewMap,
+    pub(crate) coverage_view: coverage::CoverageView,
 
     // Inline commit selector state (shown at top of diff view for multi-commit reviews)
     /// CommitInfo for commits in the current review (display order: newest first)
@@ -1508,6 +1531,13 @@ pub struct App {
     pub pr_range_reload_state: Option<PrRangeReloadRequest>,
     /// Background-thread channel for the active range re-fetch.
     pub pr_range_reload_rx: Option<std::sync::mpsc::Receiver<PrRangeReloadEvent>>,
+    /// Initial PR subset to prepare once its requested patch has loaded.
+    prepare_on_initial_range: Option<(usize, usize)>,
+    /// Revision pair of the applied PR subset; the selection can change before
+    /// the patches land, or remain narrowed after a failed range request.
+    applied_pr_range: Option<AppliedPrRange>,
+    /// Applied local subset rather than the selector's possibly failed choice.
+    applied_local_subset: Option<DiffSource>,
     /// Whether the inline commit selector panel is visible
     pub show_commit_selector: bool,
     /// Display order for the inline commit selector (presentation only).
@@ -2022,6 +2052,9 @@ mod coloring;
 mod comment_vim;
 mod comments;
 mod commits;
+pub(crate) mod companion;
+mod companion_history;
+pub(crate) mod coverage;
 mod diff_load;
 mod editor_target;
 mod file_filter;
@@ -2031,6 +2064,11 @@ mod init;
 mod modes;
 mod navigation;
 mod pr;
+mod preparation;
+mod preparation_ui;
+mod review_map;
+pub(crate) use review_map::{GuideEntryCue, GuideViewport, MapEntry, MapRow};
+mod review_source;
 mod reviewed;
 mod search;
 mod session;

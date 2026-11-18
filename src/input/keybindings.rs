@@ -54,6 +54,27 @@ pub enum Action {
     AddRangeComment,
     AddRangeSuggestion,
 
+    // Review guide
+    GuidePrimary,
+    GuideExplicit,
+    GuideWrong,
+    GuidePark,
+    GuidePrevious,
+    GuideReturn,
+    GuideToggleMap,
+    GuideDismissGroup,
+
+    // Private review companion
+    OpenCompanion,
+    CompanionHistory,
+    CompanionDraftFeedback,
+    CompanionEditFeedback,
+    CompanionMore,
+    CompanionCancel,
+    CompanionGrow,
+    CompanionShrink,
+    CompanionConfirmConcern,
+
     // Session
     Quit,
     /// Transitional hint for the removed `q`-quits binding: shows a message
@@ -122,6 +143,8 @@ pub enum Action {
     BeginTargetFilter,
     /// Toggle PR tab between all open PRs and PRs awaiting your review (`r`).
     TogglePrReviewRequestedFilter,
+    PrepareSelectedPr,
+    CancelSelectedPrPreparation,
     /// Sessions tab: show or hide sessions holding no review progress.
     SessionsTabToggleShowEmpty,
     /// Sessions tab: delete the session under the cursor, after a confirm.
@@ -139,6 +162,7 @@ pub enum Action {
     /// Reload the PR in submit confirm (`r`, only when stale-head warning is
     /// active). Currently triggers the same path as `:e`.
     SubmitReloadPr,
+    EditCoverageNote,
 
     // Submit action picker (bare `:submit`)
     /// Move action-picker cursor down (`j` / Down).
@@ -204,19 +228,21 @@ pub fn map_key_to_action_with_q_quits(
         InputMode::Search => map_search_mode(key),
         InputMode::Comment => map_comment_mode(key),
         InputMode::Help => map_help_mode(key),
-        InputMode::MessageDetails => match map_help_mode(key) {
+        InputMode::MessageDetails | InputMode::GuideDetails => match map_help_mode(key) {
             Action::EnterSearchMode | Action::SearchNext | Action::SearchPrev => Action::None,
             action => action,
         },
         InputMode::Summary => map_summary_mode(key),
+        InputMode::Coverage => map_help_mode(key),
         InputMode::Confirm => map_confirm_mode(key),
         InputMode::CommitSelect => map_commit_select_mode_with_q_quits(key, q_quits),
-        InputMode::VisualSelect => map_visual_mode_with_q_quits(key, q_quits),
+        InputMode::VisualSelect => map_visual_mode_with_q_quits(key, leader_key, q_quits),
         InputMode::SubmitResolver => map_submit_resolver_mode(key),
         InputMode::SubmitConfirm => map_submit_confirm_mode(key),
         InputMode::SubmitActionPicker => map_submit_action_picker_mode_with_q_quits(key, q_quits),
         InputMode::ThemePicker => map_theme_picker_mode(key),
         InputMode::FilePicker => map_file_picker_mode(key),
+        InputMode::Companion => map_companion_mode(key),
     }
 }
 
@@ -289,6 +315,7 @@ fn map_normal_mode_with_q_quits(key: KeyEvent, leader_key: char, q_quits: bool) 
         (KeyCode::Char('e'), KeyModifiers::NONE) => Action::EditFile,
         (KeyCode::Char('n'), KeyModifiers::NONE) => Action::SearchNext,
         (KeyCode::Char('N'), _) => Action::SearchPrev,
+        (KeyCode::Char('a'), KeyModifiers::NONE) => Action::OpenCompanion,
 
         // Mode changes (use _ for shifted characters like : and ?)
         (KeyCode::Char(':'), _) => Action::EnterCommandMode,
@@ -305,6 +332,25 @@ fn map_normal_mode_with_q_quits(key: KeyEvent, leader_key: char, q_quits: bool) 
 
         (KeyCode::Char(c @ '0'..='9'), KeyModifiers::NONE) => Action::Digit(c as u8 - b'0'),
 
+        _ => Action::None,
+    }
+}
+
+/// Context-specific bindings are tried only after existing actions (including
+/// the configured leader) have had the chance to claim the key.
+pub(crate) fn map_review_guide_key(key: KeyEvent, map_focused: bool) -> Action {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('t'), KeyModifiers::NONE) => Action::GuideToggleMap,
+        (KeyCode::Char('D'), KeyModifiers::NONE | KeyModifiers::SHIFT) if map_focused => {
+            Action::GuideDismissGroup
+        }
+        _ if map_focused => Action::None,
+        (KeyCode::Char('.'), KeyModifiers::NONE) => Action::GuidePrimary,
+        (KeyCode::Char('K'), KeyModifiers::NONE | KeyModifiers::SHIFT) => Action::GuideExplicit,
+        (KeyCode::Char('x'), KeyModifiers::NONE) => Action::GuideWrong,
+        (KeyCode::Char('p'), KeyModifiers::NONE) => Action::GuidePark,
+        (KeyCode::Char(','), KeyModifiers::NONE) => Action::GuidePrevious,
+        (KeyCode::Char('\''), KeyModifiers::NONE) => Action::GuideReturn,
         _ => Action::None,
     }
 }
@@ -500,6 +546,7 @@ fn map_submit_confirm_mode(key: KeyEvent) -> Action {
         (KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter, _) => Action::ConfirmYes,
         (KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc, _) => Action::ConfirmNo,
         (KeyCode::Char('r') | KeyCode::Char('R'), _) => Action::SubmitReloadPr,
+        (KeyCode::Char('e'), KeyModifiers::NONE) => Action::EditCoverageNote,
         _ => Action::None,
     }
 }
@@ -538,6 +585,10 @@ fn map_commit_select_mode_with_q_quits(key: KeyEvent, q_quits: bool) -> Action {
         (KeyCode::BackTab, _) => Action::TargetSelectorTabPrev,
         (KeyCode::Char('/'), _) => Action::BeginTargetFilter,
         (KeyCode::Char('r'), KeyModifiers::NONE) => Action::TogglePrReviewRequestedFilter,
+        (KeyCode::Char('p'), KeyModifiers::NONE) => Action::PrepareSelectedPr,
+        (KeyCode::Char('P'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+            Action::CancelSelectedPrPreparation
+        }
         // Sessions-tab only; the other tabs ignore these in their dispatch.
         (KeyCode::Char('a'), KeyModifiers::NONE) => Action::SessionsTabToggleShowEmpty,
         (KeyCode::Char('d'), KeyModifiers::NONE) => Action::PendingDCommand,
@@ -660,23 +711,58 @@ pub fn map_theme_picker_filter_mode(key: KeyEvent) -> Action {
     }
 }
 
-#[cfg(test)]
-fn map_visual_mode(key: KeyEvent) -> Action {
-    map_visual_mode_with_q_quits(key, false)
+fn map_companion_mode(key: KeyEvent) -> Action {
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, KeyModifiers::NONE) => Action::ExitMode,
+        (KeyCode::Enter, KeyModifiers::NONE) => Action::SubmitInput,
+        (KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('\t'), _) => Action::CompanionHistory,
+        (KeyCode::Char('d'), KeyModifiers::CONTROL) => Action::CompanionDraftFeedback,
+        (KeyCode::Char('e'), KeyModifiers::CONTROL) => Action::CompanionEditFeedback,
+        (KeyCode::Char('o'), KeyModifiers::CONTROL) => Action::CompanionMore,
+        (KeyCode::Char('x'), KeyModifiers::CONTROL) => Action::CompanionCancel,
+        (KeyCode::Char('g'), KeyModifiers::CONTROL) => Action::CompanionConfirmConcern,
+        (KeyCode::Up, KeyModifiers::CONTROL) => Action::CompanionGrow,
+        (KeyCode::Down, KeyModifiers::CONTROL) => Action::CompanionShrink,
+        (KeyCode::Up, KeyModifiers::SHIFT) => Action::ScrollViewUp(1),
+        (KeyCode::Down, KeyModifiers::SHIFT) => Action::ScrollViewDown(1),
+        (KeyCode::Left, KeyModifiers::SHIFT) => Action::ScrollLeft(4),
+        (KeyCode::Right, KeyModifiers::SHIFT) => Action::ScrollRight(4),
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) => Action::ClearLine,
+        (KeyCode::Char('w'), KeyModifiers::CONTROL) => Action::DeleteWord,
+        (KeyCode::Backspace, KeyModifiers::NONE) => Action::DeleteChar,
+        (KeyCode::Down, KeyModifiers::NONE) => Action::CursorDown(1),
+        (KeyCode::Up, KeyModifiers::NONE) => Action::CursorUp(1),
+        (KeyCode::PageDown, KeyModifiers::NONE) => Action::PageDown,
+        (KeyCode::PageUp, KeyModifiers::NONE) => Action::PageUp,
+        (KeyCode::End, KeyModifiers::NONE) => Action::TextCursorLineEnd,
+        (KeyCode::Home, KeyModifiers::NONE) => Action::TextCursorLineStart,
+        (KeyCode::Left, KeyModifiers::NONE) => Action::TextCursorLeft,
+        (KeyCode::Right, KeyModifiers::NONE) => Action::TextCursorRight,
+        (KeyCode::Char(c), mods) if is_altgr_text(mods) => Action::InsertChar(c),
+        (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => Action::InsertChar(c),
+        _ => Action::None,
+    }
 }
 
-fn map_visual_mode_with_q_quits(key: KeyEvent, q_quits: bool) -> Action {
+#[cfg(test)]
+fn map_visual_mode(key: KeyEvent) -> Action {
+    map_visual_mode_with_q_quits(key, crate::config::DEFAULT_LEADER_KEY, false)
+}
+
+fn map_visual_mode_with_q_quits(key: KeyEvent, leader_key: char, q_quits: bool) -> Action {
     match (key.code, key.modifiers) {
         // Extend selection
         (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => Action::CursorDown(1),
         (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => Action::CursorUp(1),
         (KeyCode::Char('c'), KeyModifiers::NONE) => Action::AddRangeComment,
         (KeyCode::Char('s'), KeyModifiers::NONE) => Action::AddRangeSuggestion,
+        (KeyCode::Char('a'), KeyModifiers::NONE) => Action::OpenCompanion,
         (KeyCode::Enter, KeyModifiers::NONE) => Action::AddRangeComment,
         (KeyCode::Char('y'), KeyModifiers::NONE) => Action::ExportToClipboard,
         (KeyCode::Esc, KeyModifiers::NONE) => Action::ExitMode,
         (KeyCode::Char('v') | KeyCode::Char('V'), _) => Action::ExitMode,
         (KeyCode::Char('q'), KeyModifiers::NONE) => q_action(q_quits),
+        (KeyCode::Char(c), KeyModifiers::NONE) if c == leader_key => Action::PendingLeaderCommand,
         _ => Action::None,
     }
 }
@@ -693,6 +779,38 @@ mod tests {
 
     fn key_shift(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn should_route_plain_a_with_visual_keys_and_normal_leader_precedence() {
+        let a = key(KeyCode::Char('a'));
+        for mode in [InputMode::Normal, InputMode::VisualSelect] {
+            assert_eq!(
+                map_key_to_action(a, mode, DEFAULT_LEADER_KEY),
+                Action::OpenCompanion
+            );
+        }
+        assert_eq!(
+            map_key_to_action(a, InputMode::Normal, 'a'),
+            Action::PendingLeaderCommand
+        );
+        assert_eq!(
+            map_key_to_action(a, InputMode::VisualSelect, 'a'),
+            Action::OpenCompanion
+        );
+        assert_eq!(
+            map_key_to_action(a, InputMode::CommitSelect, 'a'),
+            Action::SessionsTabToggleShowEmpty
+        );
+        for mode in [
+            InputMode::Command,
+            InputMode::Search,
+            InputMode::Comment,
+            InputMode::Companion,
+        ] {
+            assert_eq!(map_key_to_action(a, mode, 'a'), Action::InsertChar('a'));
+        }
+        assert_eq!(map_file_tree_prompt_mode(a), Action::InsertChar('a'));
     }
 
     #[test]
@@ -1334,7 +1452,7 @@ mod tests {
             Action::Quit
         );
         assert_eq!(
-            map_visual_mode_with_q_quits(key(KeyCode::Char('q')), true),
+            map_visual_mode_with_q_quits(key(KeyCode::Char('q')), DEFAULT_LEADER_KEY, true),
             Action::Quit
         );
         assert_eq!(

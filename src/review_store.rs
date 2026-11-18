@@ -8,6 +8,8 @@ use crate::persistence::manifest::{ManifestEntry, ManifestKind};
 use crate::persistence::storage;
 pub use crate::persistence::storage::DeleteOutcome;
 
+pub(crate) mod anchors;
+
 /// File-backed access to persisted tuicr review sessions.
 #[derive(Debug, Clone, Default)]
 pub struct ReviewStore {
@@ -79,7 +81,14 @@ impl ReviewStore {
         let reviews_dir = self.reviews_dir()?;
         let (_session, comment) =
             storage::update_session_in_dir(session_ref.path(), &reviews_dir, |session| {
-                add_comment_to_session(session, request)
+                let text = anchors::target_range(&request.target)
+                    .and_then(|(path, range, side)| {
+                        let source = anchors::saved_source(session, side)?;
+                        let text = source.local_text()(path)?;
+                        Some(anchors::capture(&text, range))
+                    })
+                    .unwrap_or_default();
+                add_comment_with_text(session, request, text)
             })?;
         Ok(comment)
     }
@@ -279,6 +288,14 @@ pub fn add_comment_to_session(
     session: &mut ReviewSession,
     request: AddCommentRequest,
 ) -> Result<Comment> {
+    add_comment_with_text(session, request, Vec::new())
+}
+
+pub(crate) fn add_comment_with_text(
+    session: &mut ReviewSession,
+    request: AddCommentRequest,
+    original_text: Vec<String>,
+) -> Result<Comment> {
     let content = request.content.trim().to_string();
     if content.is_empty() {
         return Err(TuicrError::InvalidInput(
@@ -310,6 +327,7 @@ pub fn add_comment_to_session(
             if let Some(sha) = &commit_id {
                 comment = comment.with_commit_id(sha.clone());
             }
+            comment.original_text = original_text;
             review.add_line_comment(line, comment.clone());
             comment
         }
@@ -321,6 +339,7 @@ pub fn add_comment_to_session(
             if let Some(sha) = &commit_id {
                 comment = comment.with_commit_id(sha.clone());
             }
+            comment.original_text = original_text;
             review.add_line_comment(range.end, comment.clone());
             comment
         }

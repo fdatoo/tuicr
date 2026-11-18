@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -e -u -o pipefail
 
+# shellcheck source=_tuicr-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_tuicr-common.sh"
 
 # Configuration - override via environment variables
@@ -140,7 +141,8 @@ launch_tuicr_pane() {
   # ponytail: returns immediately — cmux has no tmux-style `wait-for`, and the
   # documented agent loop is polling `tuicr review comments` anyway. Add a FIFO
   # handshake (as the zellij wrapper does) only if a blocking launch is needed.
-  log_info "Not waiting for exit. Read feedback with: tuicr review comments --repo $target_dir --session <slug>"
+  log_info "Not waiting for exit."
+  tuicr_report_saved_comments "$target_dir"
 }
 
 main() {

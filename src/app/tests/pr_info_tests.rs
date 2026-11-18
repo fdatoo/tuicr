@@ -30,6 +30,7 @@ fn sample_pr_info() -> PullRequestInfo {
             merged_at: None,
             diff_start_sha: None,
         },
+        base_sha_confirmed: false,
         review_decision: Some("REVIEW_REQUIRED".to_string()),
         mergeable: Some("MERGEABLE".to_string()),
         merge_state: Some("BLOCKED".to_string()),
@@ -265,6 +266,25 @@ fn should_keep_pr_info_annotations_in_sync_with_rendered_lines_at_wrap_boundary(
         lines.len(),
         "PrInfoLine annotation count must equal the rendered PR-info line count"
     );
+}
+
+#[test]
+fn should_keep_offscreen_issue_comment_placeholders_for_vec_callers() {
+    use crate::ui::pr_info_panel::{append_issue_comments_section, issue_comments_render_height};
+    use ratatui::text::Line;
+
+    let app = build_pr_app();
+    let mut lines = vec![Line::from("preceding row")];
+    let mut line_idx = 1;
+    let width = app.diff_state.viewport_width.saturating_sub(1);
+    append_issue_comments_section(&app, &mut lines, &mut line_idx, 1, width, (0, 2));
+
+    assert_eq!(line_idx, 1 + issue_comments_render_height(&app));
+    assert_eq!(line_idx, lines.len());
+    assert_eq!(lines[0], Line::from("preceding row"));
+    assert!(!lines[1].spans.is_empty(), "section header remains visible");
+    assert!(lines.len() > 2, "the fixture has an offscreen comment box");
+    assert!(lines[2..].iter().all(|line| line.spans.is_empty()));
 }
 
 fn pr_info_annotation_count(app: &App) -> usize {

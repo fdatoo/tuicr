@@ -9,7 +9,7 @@ def main(s: Scenario) -> None:
     tui.cursor_on("4 ▌ second line")
     tui.keys("c").wait_for("COMMENT")
     tui.keys("original text").keys("Enter")
-    tui.wait_for("original text")
+    tui.wait_for("original text").wait_for("Comments · 1")
     # m jumps to the next comment (the cursor lands on the comment box)
     tui.keys("g").keys("m")
     tui.keys("i").wait_for("COMMENT")
@@ -17,7 +17,7 @@ def main(s: Scenario) -> None:
     tui.wait_for("original text EDITED")
     # delete
     tui.keys("d", "d")
-    tui.wait_gone("original text EDITED")
+    tui.wait_gone("original text EDITED").wait_gone("Comments · 1")
     tui.save()
     assert s.session_json(), "no saved session to check"
     assert not s.session_has("original text"), f"deleted comment still in session json\n{s.session_json()}"

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -e -u -o pipefail
 
+# shellcheck source=_tuicr-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_tuicr-common.sh"
 
 TUICR_PANE_DIRECTION="${TUICR_PANE_DIRECTION:-right}"
@@ -94,48 +95,29 @@ launch_tuicr_pane() {
   new_pane_id=$(printf '%s\n' "$split_response" | \
     "$JQ_BIN" -er '.result.pane.pane_id')
 
-  local tuicr_bin
-  tuicr_bin=$(command -v tuicr)
-
   local quoted_tuicr
-  printf -v quoted_tuicr '%q' "$tuicr_bin"
-  quoted_tuicr="$quoted_tuicr$(tuicr_quote_args "${tuicr_args[@]+"${tuicr_args[@]}"}")"
+  quoted_tuicr=$(tuicr_quote_args "$(command -v tuicr)" "${tuicr_args[@]+"${tuicr_args[@]}"}")
 
   # Optional --stdout capture: skips tuicr's save & copy confirm dialog on
   # exit and writes the exported review straight to a file we print below.
   local output_file=""
-  local use_stdout=false
   if tuicr_stdout_supported; then
     output_file=$(mktemp /tmp/tuicr-output.XXXXXX)
     quoted_tuicr="$quoted_tuicr --stdout > '$output_file'"
-    use_stdout=true
     log_info "Using --stdout mode (output will be captured)"
-  else
-    log_warn "tuicr --stdout not supported, output will be copied to clipboard"
   fi
 
   local completion_suffix="_DONE_$$_${RANDOM}__"
   local completion_token="__TUICR${completion_suffix}"
-  # `herdr pane run` injects this string into the pane's *interactive* shell,
-  # which is not necessarily bash: `$?` and `VAR=value` are both parse errors
-  # under fish. Wrap the payload in `bash -c` so the pane's shell only has to
-  # forward one single-quoted argument -- single-quote semantics are identical
-  # in bash, zsh and fish. bash (not sh) because $quoted_tuicr carries bash's
-  # printf %q quoting, which can emit non-POSIX $'...' forms.
-  # $completion_suffix needs no quoting: it is built from $$ and $RANDOM, so it
-  # is digits and underscores by construction.
+  # Herdr injects text into the pane's interactive shell. Quote the entire
+  # inner script as one argument, independently of the argv quoted above.
   local inner_script
   inner_script="$quoted_tuicr; printf \"\\n__TUICR%s:%s\\n\" $completion_suffix \$?"
 
-  # $quoted_tuicr may itself contain a `'` (e.g. a -r revset with an
-  # apostrophe, %q-escaped as \' for bash's own parsing). Embedding that raw
-  # into the outer single-quoted argument below would close it early. Escape
-  # every `'` as '\'' (close, escaped literal quote, reopen) so the pane's
-  # shell reproduces $inner_script byte-for-byte as bash -c's one argument.
-  local escaped_inner_script="${inner_script//\'/\'\\\'\'}"
-
+  # The literal completion token must not be echoed in the command itself:
+  # wait-output would then match the input instead of the child's status.
   local pane_command
-  pane_command="bash -c '$escaped_inner_script'"
+  pane_command="bash -c$(tuicr_quote_args "$inner_script")"
 
   "$HERDR_BIN" pane run "$new_pane_id" "$pane_command" >/dev/null
 
@@ -162,13 +144,14 @@ launch_tuicr_pane() {
 
   if [[ "$tuicr_status" -eq 0 ]]; then
     log_info "tuicr finished"
+    tuicr_report_stdout_output "$output_file" "$target_dir"
   else
     log_error "tuicr exited with status $tuicr_status"
+    if [[ -n "$output_file" ]]; then
+      rm -f "$output_file"
+    fi
+    return "$tuicr_status"
   fi
-
-  tuicr_report_stdout_output "$use_stdout" "$output_file"
-
-  return "$tuicr_status"
 }
 
 main() {

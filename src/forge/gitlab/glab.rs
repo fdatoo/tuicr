@@ -12,8 +12,9 @@ use crate::forge::remote_url::{
 };
 use crate::forge::traits::{
     ForgeBackend, ForgeFileLinesRequest, ForgeRepository, GhCreateReviewResponse,
-    PagedPullRequests, PullRequestCommit, PullRequestDetails, PullRequestListQuery,
-    PullRequestListScope, PullRequestReviewMetadata, PullRequestReviewRecord, PullRequestTarget,
+    PagedPullRequests, PullRequestCommit, PullRequestDetails, PullRequestInfo,
+    PullRequestListQuery, PullRequestListScope, PullRequestReviewMetadata, PullRequestReviewRecord,
+    PullRequestTarget,
 };
 use crate::forge::{forge_path, local_range_diff, percent_encode_component};
 use crate::model::{FilePatch, LineOrigin};
@@ -453,6 +454,15 @@ where
         let output = self.run_api(&repository, endpoint)?;
         let mr: GlabMrDetails = serde_json::from_str(&output)?;
         mr.into_details(&repository)
+    }
+
+    fn get_pull_request_info(&self, target: PullRequestTarget) -> Result<PullRequestInfo> {
+        // GitLab's diff_refs.base_sha identifies the merge base of the MR diff.
+        let details = self.get_pull_request(target)?;
+        Ok(PullRequestInfo {
+            base_sha_confirmed: !details.base_sha.is_empty(),
+            ..PullRequestInfo::from_details(details)
+        })
     }
 
     fn get_pull_request_diff(&self, pr: &PullRequestDetails) -> Result<Vec<FilePatch>> {
@@ -1615,12 +1625,13 @@ mod tests {
         ]);
         let backend = GitLabGlabBackend::with_runner(Some(repo), runner);
 
-        let details = backend
-            .get_pull_request(PullRequestTarget::number(42, "42"))
+        let info = backend
+            .get_pull_request_info(PullRequestTarget::number(42, "42"))
             .unwrap();
 
-        assert_eq!(details.number, 42);
-        assert_eq!(details.head_sha, "headsha1");
+        assert_eq!(info.details.number, 42);
+        assert_eq!(info.details.head_sha, "headsha1");
+        assert!(info.base_sha_confirmed);
         let calls = backend.runner.calls.borrow();
         assert_eq!(
             calls[0].0,
@@ -1630,6 +1641,29 @@ mod tests {
             !calls[0].0.iter().any(|arg| arg == "--output"),
             "glab 1.36 does not support `mr view --output`"
         );
+    }
+
+    #[test]
+    fn should_leave_base_unconfirmed_when_gitlab_has_no_diff_refs() {
+        let repo = ForgeRepository::gitlab("gitlab.com", "owner", "repo");
+        let runner = RecordingRunner::new_with_responses(vec![
+            r#"{
+                "iid": 42,
+                "title": "Test MR",
+                "web_url": "https://gitlab.com/owner/repo/-/merge_requests/42",
+                "state": "opened",
+                "sha": "headsha1"
+            }"#
+            .to_string(),
+        ]);
+        let backend = GitLabGlabBackend::with_runner(Some(repo), runner);
+        let info = backend
+            .get_pull_request_info(PullRequestTarget::number(42, "42"))
+            .unwrap();
+
+        assert_eq!(info.details.head_sha, "headsha1");
+        assert!(info.details.base_sha.is_empty());
+        assert!(!info.base_sha_confirmed);
     }
 
     /// A relative-URL install's subfolder lands in `owner` (it is

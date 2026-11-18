@@ -2,8 +2,9 @@ use std::io::{self, Write};
 
 use crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -225,7 +226,7 @@ fn activate_writer<W: Write>(writer: &mut W, features: TerminalFeatures) -> anyh
     // Bracketed paste makes multi-line and control-character pastes arrive as
     // one `Event::Paste` instead of letting each character drive normal-mode
     // actions like Enter submit or command-mode entry.
-    execute!(writer, EnableBracketedPaste)?;
+    execute!(writer, EnableBracketedPaste, EnableFocusChange)?;
 
     // REPORT_EVENT_TYPES distinguishes Press from Repeat from Release so the
     // two-press file walk can require an actual key release between presses.
@@ -245,7 +246,7 @@ fn activate_writer<W: Write>(writer: &mut W, features: TerminalFeatures) -> anyh
 
 fn deactivate_writer<W: Write>(writer: &mut W, mouse_enabled: bool) -> anyhow::Result<()> {
     let _ = execute!(writer, PopKeyboardEnhancementFlags);
-    let _ = execute!(writer, DisableBracketedPaste);
+    let _ = execute!(writer, DisableBracketedPaste, DisableFocusChange);
     if mouse_enabled {
         let _ = execute!(writer, DisableMouseCapture);
     }

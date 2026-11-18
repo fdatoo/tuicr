@@ -414,7 +414,8 @@ fn line_side_arg_to_model(side: LineSideArg) -> LineSide {
 fn show_comments(session: &str, repo: &Path, out: &mut impl Write) -> Result<()> {
     let store = ReviewStore::new();
     let session_ref = resolve_session_ref(&store, repo, session)?;
-    let session = store.get_review(&session_ref)?;
+    let mut session = store.get_review(&session_ref)?;
+    crate::review_store::anchors::reconcile_saved(&mut session);
     let comments = collect_comments(&session);
     serde_json::to_writer_pretty(&mut *out, &comments)?;
     writeln!(out)?;
@@ -640,6 +641,9 @@ struct CommentOutput {
     lifecycle_state: &'static str,
     created_at: String,
     content: String,
+    stale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_text: Option<Vec<String>>,
 }
 
 impl CommentOutput {
@@ -690,6 +694,8 @@ impl CommentOutput {
             lifecycle_state: lifecycle_id(comment.lifecycle_state),
             created_at: comment.created_at.to_rfc3339(),
             content: comment.content.clone(),
+            stale: comment.stale,
+            original_text: comment.stale.then(|| comment.original_text.clone()),
         }
     }
 }

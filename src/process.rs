@@ -225,3 +225,90 @@ where
         status: output.status.code(),
     })
 }
+
+/// Read a subprocess without retaining arbitrarily large output or waiting
+/// forever for the child (or, on Unix, a descendant holding its pipe).
+/// `allow_prefix` is for bounded listings: it accepts a truncated prefix and
+/// treats a status of 1 with no output as an empty listing.
+pub(crate) fn read_bounded_command(
+    command: &mut Command,
+    cap: usize,
+    timeout: std::time::Duration,
+    allow_prefix: bool,
+) -> Option<Vec<u8>> {
+    use std::io::Read;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let deadline = Instant::now() + timeout;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let result = (|| {
+        let stdout = child.stdout.take()?;
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        thread::Builder::new()
+            .spawn(move || {
+                let mut output = Vec::new();
+                let read = stdout.take(cap as u64 + 1).read_to_end(&mut output);
+                let _ = send.send(read.map(|_| output));
+            })
+            .ok()?;
+        let output = receive
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .ok()?
+            .ok()?;
+        if output.len() > cap {
+            return Some((None, output));
+        }
+        // Don't reap the leader until stdout is closed: a descendant may
+        // have inherited it, and the leader's PID identifies the process group.
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            if let Some(status) = child.try_wait().ok()? {
+                return Some((Some(status), output));
+            }
+            thread::sleep(Duration::from_millis(5).min(remaining));
+        }
+    })();
+    match result {
+        Some((Some(status), output)) if status.success() => Some(output),
+        Some((Some(status), output))
+            if allow_prefix && status.code() == Some(1) && output.is_empty() =>
+        {
+            Some(output)
+        }
+        Some((None, mut output)) => {
+            terminate_read_command(&mut child);
+            output.truncate(cap);
+            allow_prefix.then_some(output)
+        }
+        Some(_) => None,
+        None => {
+            terminate_read_command(&mut child);
+            None
+        }
+    }
+}
+
+fn terminate_read_command(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // SAFETY: the child was started in its own process group, with its
+        // positive PID as the group ID, and has not been reaped.
+        unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}

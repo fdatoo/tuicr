@@ -320,7 +320,9 @@ pub fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             InputMode::Comment => " COMMENT ".to_string(),
             InputMode::Help => " HELP ".to_string(),
             InputMode::MessageDetails => " ERROR ".to_string(),
+            InputMode::GuideDetails => " GUIDE ".to_string(),
             InputMode::Summary => " SUMMARY ".to_string(),
+            InputMode::Coverage => " COVERAGE ".to_string(),
             InputMode::Confirm => " CONFIRM ".to_string(),
             InputMode::CommitSelect => " SELECT ".to_string(),
             InputMode::VisualSelect => {
@@ -339,6 +341,7 @@ pub fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             InputMode::SubmitActionPicker => " SUBMIT ".to_string(),
             InputMode::ThemePicker => " THEME ".to_string(),
             InputMode::FilePicker => " FILES ".to_string(),
+            InputMode::Companion => " PRIVATE ".to_string(),
         };
 
         let mode_span = Span::styled(mode_str, styles::mode_style(theme));
@@ -358,11 +361,22 @@ pub fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             Cow::Borrowed("   \u{21b5} apply filter \u{00b7} esc cancel filter")
         } else {
             match app.input_mode {
-                InputMode::Normal if app.focused_panel == FocusedPanel::FileList => Cow::Borrowed(
-                    "   j/k move \u{00b7} \u{21b5} open \u{00b7} i/e filter \u{00b7} I/E clear \u{00b7} / search \u{00b7} r reviewed",
-                ),
+                InputMode::Normal if app.open_preparation_step().is_some() => {
+                    Cow::Borrowed("   ? help")
+                }
+                InputMode::Normal if app.focused_panel == FocusedPanel::FileList => {
+                    Cow::Borrowed("   j/k move · ↵ open · ? help")
+                }
+                InputMode::Normal if app.focused_panel != FocusedPanel::Diff => {
+                    Cow::Borrowed("   j/k move · ? help")
+                }
                 InputMode::Normal => Cow::Borrowed(
-                    "   j/k scroll \u{00b7} {/} file \u{00b7} m/M comment \u{00b7} r file \u{00b7} R hunk \u{00b7} c comment \u{00b7} ? help",
+                    match (app.installed_guide().is_some(), app.leader_key == 'a') {
+                        (true, true) => "   j/k scroll · :guide · aa ask · c comment · ? help",
+                        (true, false) => "   j/k scroll · :guide · a ask · c comment · ? help",
+                        (false, true) => "   j/k scroll · :prepare · aa ask · c comment · ? help",
+                        (false, false) => "   j/k scroll · :prepare · a ask · c comment · ? help",
+                    },
                 ),
                 InputMode::Command => {
                     Cow::Borrowed("   tab complete \u{00b7} \u{21b5} execute \u{00b7} esc cancel")
@@ -373,7 +387,10 @@ pub fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 }
                 InputMode::Comment => Cow::Borrowed("   ctrl-s save \u{00b7} esc cancel"),
                 InputMode::Help => Cow::Borrowed("   / search · n/N match · q/?/esc close"),
-                InputMode::MessageDetails => Cow::Borrowed("   j/k scroll · q/esc close"),
+                InputMode::MessageDetails | InputMode::GuideDetails => {
+                    Cow::Borrowed("   j/k scroll · q/esc close")
+                }
+                InputMode::Coverage => Cow::Borrowed(""),
                 InputMode::Summary => {
                     Cow::Borrowed("   j/k select · dd delete · ↵ jump · q/esc close")
                 }
@@ -381,9 +398,12 @@ pub fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 InputMode::CommitSelect => Cow::Borrowed(
                     "   j/k navigate \u{00b7} space select \u{00b7} \u{21b5} confirm \u{00b7} esc back",
                 ),
-                InputMode::VisualSelect => Cow::Borrowed(
-                    "   j/k extend \u{00b7} c/\u{21b5} comment \u{00b7} s suggest \u{00b7} y yank \u{00b7} esc/V cancel",
-                ),
+                InputMode::VisualSelect if app.leader_key == 'a' => {
+                    Cow::Borrowed("   j/k extend · aa ask · c/↵ comment · esc cancel")
+                }
+                InputMode::VisualSelect => {
+                    Cow::Borrowed("   j/k extend · a ask · c/↵ comment · s suggest · esc cancel")
+                }
                 InputMode::SubmitResolver => Cow::Borrowed(
                     "   j/k move \u{00b7} \u{21b5} toggle \u{00b7} s submit \u{00b7} esc cancel",
                 ),
@@ -391,7 +411,7 @@ pub fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                     Cow::Borrowed("   y submit \u{00b7} n cancel \u{00b7} esc cancel")
                 }
                 InputMode::SubmitActionPicker => {
-                    Cow::Borrowed("   j/k move \u{00b7} \u{21b5} submit \u{00b7} esc cancel")
+                    Cow::Borrowed("   j/k choose · ↵ continue · esc cancel")
                 }
                 InputMode::ThemePicker => Cow::Borrowed(
                     "   j/k move \u{00b7} \u{21b5} apply \u{00b7} / filter \u{00b7} esc cancel",
@@ -399,6 +419,7 @@ pub fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 InputMode::FilePicker => Cow::Borrowed(
                     "   j/k move \u{00b7} \u{21b5} open \u{00b7} / filter \u{00b7} esc cancel",
                 ),
+                InputMode::Companion => Cow::Borrowed(""),
             }
         };
         let hints_span = Span::styled(hints, Style::default().fg(theme.fg_secondary));
@@ -467,6 +488,20 @@ pub fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                     .bg(theme.message_info_bg)
                     .add_modifier(Modifier::BOLD),
             ),
+            width,
+        )
+    } else if let Some(step) = app.open_preparation_step() {
+        let left_width: usize = left_spans.iter().map(|span| span.content.width()).sum();
+        let width = (area.width as usize).saturating_sub(left_width);
+        let label = format!(" Preparing review · {step} ");
+        let width = width.min(label.width());
+        let label = if width < label.width() {
+            crate::ui::text_utils::truncate_or_pad(&label, width)
+        } else {
+            label
+        };
+        (
+            Span::styled(label, Style::default().fg(theme.fg_secondary)),
             width,
         )
     } else if app.forge_review_threads_loading {
@@ -776,6 +811,42 @@ mod header_snapshot_tests {
         (0..buffer.area.width)
             .map(|x| buffer[(x, y)].symbol().to_string())
             .collect()
+    }
+
+    #[test]
+    fn normal_status_offers_prepare_until_a_guide_is_installed() {
+        use crate::review_guide::{GUIDE_VERSION, ReviewGuide};
+
+        let mut app = build_pr_app(pr_source(false, false));
+        app.focused_panel = crate::app::FocusedPanel::Diff;
+        app.leader_key = 'a';
+        let footer = row_text(&draw_app(&mut app, 80, 24), 23);
+        assert!(footer.contains(":prepare"), "{footer}");
+        assert!(footer.contains("aa ask"), "{footer}");
+        assert!(footer.contains("? help"), "{footer}");
+        assert!(!footer.contains(":guide"), "{footer}");
+
+        let patch = crate::model::FilePatch::new(
+            Some("file.txt".into()),
+            Some("file.txt".into()),
+            FileStatus::Modified,
+            "@@ -1 +1 @@\n-before\n+after\n",
+        );
+        app.diff_files = crate::vcs::diff_parser::parse_file_patches(vec![patch]).unwrap();
+        let guide: ReviewGuide = serde_json::from_value(serde_json::json!({
+            "version": GUIDE_VERSION,
+            "diff": app.review_digest(),
+            "stories": [{"title": "Main change", "stops": [{
+                "id": "a", "claim": "The new text is shown.", "path": "file.txt",
+                "start_line": 1, "end_line": 1
+            }]}]
+        }))
+        .unwrap();
+        app.install_guide(guide).unwrap();
+        let footer = row_text(&draw_app(&mut app, 80, 24), 23);
+        assert!(footer.contains(":guide"), "{footer}");
+        assert!(footer.contains("? help"), "{footer}");
+        assert!(!footer.contains(":prepare"), "{footer}");
     }
 
     #[test]

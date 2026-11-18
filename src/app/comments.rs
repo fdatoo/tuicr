@@ -52,7 +52,7 @@ impl App {
         }
         let rel = (screen_row - inner.y) as usize;
         let idx = self.comment_navigator_state.list_state.offset() + rel;
-        let total = self.build_comment_navigator_items().len();
+        let total = self.comment_navigator_items().len();
         (idx < total).then_some(idx)
     }
 
@@ -192,7 +192,32 @@ impl App {
         }
     }
 
-    pub fn build_comment_navigator_items(&self) -> Vec<CommentNavigatorItem> {
+    pub(crate) fn comment_navigator_items(&self) -> &[CommentNavigatorItem] {
+        self.comment_navigator_items
+            .get_or_init(|| self.build_comment_navigator_items())
+    }
+
+    pub(crate) fn comment_navigator_max_width(
+        &self,
+        measure: impl FnMut(&CommentNavigatorItem) -> usize,
+    ) -> usize {
+        *self.comment_navigator_width.get_or_init(|| {
+            self.comment_navigator_items()
+                .iter()
+                .map(measure)
+                .max()
+                .unwrap_or_default()
+        })
+    }
+
+    fn build_comment_navigator_items(&self) -> Vec<CommentNavigatorItem> {
+        if self.forge_review_summaries.is_empty()
+            && self.forge_review_threads.is_empty()
+            && !self.session.has_comments()
+        {
+            return Vec::new();
+        }
+
         let mut items = Vec::new();
         let mut last_key: Option<CommentNavigatorKey> = None;
 
@@ -216,10 +241,11 @@ impl App {
     }
 
     pub fn has_comment_navigator_items(&self) -> bool {
-        !self.build_comment_navigator_items().is_empty()
+        !self.comment_navigator_items().is_empty()
     }
 
-    pub fn sync_comment_navigator_selection(&mut self, items: &[CommentNavigatorItem]) {
+    pub(crate) fn sync_comment_navigator_selection(&mut self) {
+        let items = self.comment_navigator_items();
         if items.is_empty() {
             self.comment_navigator_state.list_state.select(None);
             return;
@@ -242,8 +268,7 @@ impl App {
     }
 
     pub fn comment_navigator_down(&mut self, n: usize) {
-        let items = self.build_comment_navigator_items();
-        let max_idx = items.len().saturating_sub(1);
+        let max_idx = self.comment_navigator_items().len().saturating_sub(1);
         let new_idx = (self.comment_navigator_state.selected() + n).min(max_idx);
         self.comment_navigator_state.select(new_idx);
     }
@@ -254,7 +279,7 @@ impl App {
     }
 
     pub fn comment_navigator_viewport_scroll_down(&mut self, lines: usize) {
-        let total = self.build_comment_navigator_items().len();
+        let total = self.comment_navigator_items().len();
         let viewport = self.comment_navigator_state.viewport_height.max(1);
         let max_offset = total.saturating_sub(viewport);
         let new_offset = (self.comment_navigator_state.list_state.offset() + lines).min(max_offset);
@@ -279,7 +304,7 @@ impl App {
     }
 
     pub fn jump_to_selected_comment(&mut self) -> bool {
-        let items = self.build_comment_navigator_items();
+        let items = self.comment_navigator_items();
         let Some(item) = items.get(self.comment_navigator_state.selected()) else {
             self.set_message("No comments to navigate");
             return false;
@@ -474,8 +499,9 @@ impl App {
     }
 
     pub fn next_comment(&mut self) {
-        let items = self.build_comment_navigator_items();
-        if items.is_empty() {
+        let items = self.comment_navigator_items();
+        let count = items.len();
+        if count == 0 {
             self.set_message("No comments");
             return;
         }
@@ -491,12 +517,13 @@ impl App {
 
         self.comment_navigator_state.select(target_idx);
         self.jump_to_selected_comment();
-        self.set_message(format!("Comment {}/{}", target_idx + 1, items.len()));
+        self.set_message(format!("Comment {}/{}", target_idx + 1, count));
     }
 
     pub fn prev_comment(&mut self) {
-        let items = self.build_comment_navigator_items();
-        if items.is_empty() {
+        let items = self.comment_navigator_items();
+        let count = items.len();
+        if count == 0 {
             self.set_message("No comments");
             return;
         }
@@ -514,11 +541,11 @@ impl App {
             .rposition(|item| {
                 item.target_annotation < cursor && Some(&item.key) != current_key.as_ref()
             })
-            .unwrap_or(items.len() - 1);
+            .unwrap_or(count - 1);
 
         self.comment_navigator_state.select(target_idx);
         self.jump_to_selected_comment();
-        self.set_message(format!("Comment {}/{}", target_idx + 1, items.len()));
+        self.set_message(format!("Comment {}/{}", target_idx + 1, count));
     }
 
     /// True when the cursor sits on a local comment whose lifecycle state
@@ -1008,7 +1035,13 @@ impl App {
     }
 
     pub fn exit_comment_mode(&mut self) {
-        self.input_mode = InputMode::Normal;
+        self.exit_companion_comment();
+        self.cancel_guide_comment();
+        self.input_mode = if self.finish_coverage_note_edit() {
+            InputMode::SubmitConfirm
+        } else {
+            InputMode::Normal
+        };
         self.comment_buffer.clear();
         self.comment_cursor = 0;
         self.comment_preferred_column = None;
@@ -1033,7 +1066,114 @@ impl App {
             .any(|c| c.id == id && c.is_locked())
     }
 
+    fn capture_local_comment_text(&self, target: &CommentTarget) -> Vec<String> {
+        use crate::review_store::anchors;
+        let Some((path, range, side)) = anchors::target_range(target) else {
+            return Vec::new();
+        };
+        if matches!(&self.diff_source, DiffSource::PullRequest(_)) {
+            return Vec::new();
+        }
+        let Some(file) = self
+            .diff_files
+            .iter()
+            .find(|file| file.display_path() == path)
+        else {
+            return Vec::new();
+        };
+        let lines = file
+            .hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter_map(|line| {
+                let number = match side {
+                    LineSide::Old => line.old_lineno,
+                    LineSide::New => line.new_lineno,
+                }?;
+                (range.start..=range.end)
+                    .contains(&number)
+                    .then_some(line.raw_content.as_ref().unwrap_or(&line.content))
+            });
+        let mut block: Vec<_> = lines.cloned().collect();
+        if block.len() != (range.end - range.start + 1) as usize {
+            let source_path = match side {
+                LineSide::Old => file.old_path.as_deref(),
+                LineSide::New => file.new_path.as_deref(),
+            };
+            block = source_path
+                .and_then(self.snapshot_request(side).local_text())
+                .map_or_else(Vec::new, |text| anchors::capture(&text, range));
+        }
+        block
+    }
+
+    pub(super) fn reconcile_local_comments(&mut self) -> bool {
+        use crate::review_store::anchors;
+        if matches!(&self.diff_source, DiffSource::PullRequest(_)) {
+            return false;
+        }
+        let commit_id = self.commit_id_for_new_comment();
+        let narrowed = self.applied_local_subset.is_some();
+        let same_scope = |comment: &Comment| {
+            if let Some(commit) = commit_id.as_ref() {
+                comment.commit_id.as_ref() == Some(commit)
+            } else {
+                !narrowed && comment.commit_id.is_none()
+            }
+        };
+        if !self.session.files.values().any(|file| {
+            file.line_comments.values().flatten().any(|comment| {
+                !comment.original_text.is_empty() && !comment.is_locked() && same_scope(comment)
+            })
+        }) {
+            return false;
+        }
+        let old = self.snapshot_request(LineSide::Old);
+        let new = self.snapshot_request(LineSide::New);
+        let old = old.local_text();
+        let new = new.local_text();
+        let files = &self.diff_files;
+        let updates = anchors::plan(&self.session, same_scope, |path, side| {
+            let file = files.iter().find(|file| file.display_path() == path);
+            match (side, file) {
+                (LineSide::New, Some(file)) => file
+                    .new_path
+                    .as_deref()
+                    .map_or_else(|| Some(String::new()), &new),
+                (LineSide::Old, Some(file)) => file
+                    .old_path
+                    .as_deref()
+                    .map_or_else(|| Some(String::new()), &old),
+                (LineSide::New, None) => new(path),
+                (LineSide::Old, None) => old(path),
+            }
+        });
+        if updates.is_empty() {
+            return false;
+        }
+        if let Err(error) = self.persist_review_reconciliation(|session| updates.apply(session)) {
+            self.set_warning(format!("Could not save updated comment anchors: {error}"));
+        }
+        // Any draft already changed locally won the merge and still needs
+        // its anchor updated. Locked comments loaded during the merge do not.
+        updates.apply(&mut self.session);
+        self.rebuild_annotations();
+        true
+    }
+
     pub fn save_comment(&mut self) {
+        if self.editing_coverage_note() {
+            self.save_coverage_note_edit();
+            return;
+        }
+        if !self.companion_feedback_can_save() {
+            self.set_warning("Review changed. Private feedback was not saved; reopen its anchor");
+            return;
+        }
+        if !self.guide_comment_can_save() {
+            self.set_warning("Review changed. Stop feedback was not saved; reopen the stop");
+            return;
+        }
         if self.comment_buffer.trim().is_empty() {
             self.set_message("Comment cannot be empty");
             return;
@@ -1043,6 +1183,7 @@ impl App {
 
         let mut message = "Error: Could not save comment".to_string();
         let mut autosave_error = None;
+        let mut guide_comment_id = None;
 
         // Check if we're editing an existing comment
         if let Some(editing_id) = self.editing_comment_id.clone() {
@@ -1125,6 +1266,8 @@ impl App {
                 )
             };
 
+            let original_text = self.capture_local_comment_text(&target);
+
             let request = AddCommentRequest {
                 target,
                 content,
@@ -1132,19 +1275,30 @@ impl App {
                 author: self.username.clone(),
                 commit_id: self.commit_id_for_new_comment(),
             };
-            message = match add_comment_to_session(&mut self.session, request) {
-                Ok(_) => success_message,
+            message = match crate::review_store::add_comment_with_text(
+                &mut self.session,
+                request,
+                original_text,
+            ) {
+                Ok(comment) => {
+                    if self.guide_comment_pending() {
+                        guide_comment_id = Some(comment.id);
+                    }
+                    success_message
+                }
                 Err(e) => format!("Error: Could not save comment: {e}"),
             };
         }
 
         if !message.starts_with("Error:") {
+            self.mark_companion_comment_saved();
             self.dirty = true;
             if let Err(e) = self.save_current_session_merging_external() {
                 autosave_error = Some(format!("{message}; autosave failed: {e}"));
             }
         }
         if let Some(error) = autosave_error {
+            guide_comment_id = None;
             self.set_error(error);
         } else {
             self.set_message(message);
@@ -1152,6 +1306,9 @@ impl App {
         self.rebuild_annotations();
 
         self.exit_comment_mode();
+        if let Some(id) = guide_comment_id {
+            self.finish_guide_comment(id);
+        }
     }
 
     pub fn cycle_comment_type(&mut self) {

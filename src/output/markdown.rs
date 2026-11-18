@@ -14,7 +14,7 @@ use crate::forge::remote_comments::{
 };
 use crate::model::{CommentType, LineRange, LineSide, ReviewSession};
 use crate::slug::short_sha;
-/// (file_path, line_range, side, comment_type, content, commit_id)
+/// (file_path, line_range, side, comment_type, content, commit_id, stale original text)
 type CommentEntry<'a> = (
     String,
     Option<LineRange>,
@@ -22,24 +22,29 @@ type CommentEntry<'a> = (
     String,
     &'a str,
     Option<&'a str>,
+    Option<&'a [String]>,
 );
 
+#[derive(Clone, Copy, Default)]
+pub struct ExportHeader<'a> {
+    pub session_slug: Option<&'a str>,
+    pub coverage_note: Option<&'a str>,
+}
+
 /// Generate markdown content from the review session.
-/// Returns the markdown string or an error if there are no comments.
+/// Returns an error if there are no comments or coverage to export.
 pub fn generate_export_content(
     session: &ReviewSession,
     diff_source: &DiffSource,
     comment_types: &[CommentTypeDefinition],
     export: &ExportConfig,
     remote_threads: &[RemoteReviewThread],
-    session_slug: Option<&str>,
+    header: ExportHeader<'_>,
 ) -> Result<String> {
-    // In PR mode it's still useful to export PR identity + remote
-    // discussions even if the user has no local drafts. Outside PR mode
-    // we keep the existing behavior of erroring when nothing is to say.
+    // PR discussions and guide coverage are useful without local drafts.
     let has_remote = matches!(diff_source, DiffSource::PullRequest(_))
         && !filter_threads(remote_threads, PrCommentsVisibility::Unresolved).is_empty();
-    if !session.has_comments() && !has_remote {
+    if !session.has_comments() && !has_remote && header.coverage_note.is_none() {
         return Err(TuicrError::NoComments);
     }
     Ok(generate_markdown(
@@ -48,7 +53,7 @@ pub fn generate_export_content(
         comment_types,
         export,
         remote_threads,
-        session_slug,
+        header,
     ))
 }
 
@@ -58,7 +63,7 @@ pub fn export_to_clipboard(
     comment_types: &[CommentTypeDefinition],
     export: &ExportConfig,
     remote_threads: &[RemoteReviewThread],
-    session_slug: Option<&str>,
+    header: ExportHeader<'_>,
 ) -> Result<String> {
     let content = generate_export_content(
         session,
@@ -66,7 +71,7 @@ pub fn export_to_clipboard(
         comment_types,
         export,
         remote_threads,
-        session_slug,
+        header,
     )?;
     let via_terminal = copy_text_to_clipboard(&content)?;
     Ok(if via_terminal {
@@ -83,7 +88,7 @@ pub fn export_to_file(
     comment_types: &[CommentTypeDefinition],
     export: &ExportConfig,
     remote_threads: &[RemoteReviewThread],
-    session_slug: Option<&str>,
+    header: ExportHeader<'_>,
     path: &std::path::Path,
 ) -> Result<String> {
     let content = generate_export_content(
@@ -92,7 +97,7 @@ pub fn export_to_file(
         comment_types,
         export,
         remote_threads,
-        session_slug,
+        header,
     )?;
     std::fs::write(path, content)?;
     Ok(format!("Review written to {}", path.display()))
@@ -287,13 +292,13 @@ fn generate_markdown(
     comment_types: &[CommentTypeDefinition],
     export: &ExportConfig,
     remote_threads: &[RemoteReviewThread],
-    session_slug: Option<&str>,
+    header: ExportHeader<'_>,
 ) -> String {
     let mut md = String::new();
 
     // The slug names the session an agent should write comments back into.
     // `session_header = false` drops it for agents that read it as noise.
-    if let Some(slug) = session_slug.filter(|_| export.session_header()) {
+    if let Some(slug) = header.session_slug.filter(|_| export.session_header()) {
         let _ = writeln!(md, "## Session: {slug}");
         let _ = writeln!(md);
     }
@@ -304,6 +309,10 @@ fn generate_markdown(
     if !intro.is_empty() {
         let _ = writeln!(md, "{intro}");
         let _ = writeln!(md);
+    }
+
+    if let Some(note) = header.coverage_note {
+        let _ = writeln!(md, "{note}\n");
     }
 
     // Scope banner. `scope_line` governs the prose "what am I reviewing" line;
@@ -387,6 +396,7 @@ fn generate_markdown(
             resolve_comment_type_label(&comment.comment_type, comment_types),
             &comment.content,
             None,
+            None,
         ));
     }
 
@@ -406,6 +416,7 @@ fn generate_markdown(
                 resolve_comment_type_label(&comment.comment_type, comment_types),
                 &comment.content,
                 comment.commit_id.as_deref(),
+                None,
             ));
         }
 
@@ -426,6 +437,7 @@ fn generate_markdown(
                     resolve_comment_type_label(&comment.comment_type, comment_types),
                     &comment.content,
                     comment.commit_id.as_deref(),
+                    comment.stale.then_some(comment.original_text.as_slice()),
                 ));
             }
         }
@@ -442,7 +454,7 @@ fn generate_markdown(
         }
         local_section_written = true;
     }
-    for (i, (file, line_range, side, comment_type, content, commit_id)) in
+    for (i, (file, line_range, side, comment_type, content, commit_id, stale_text)) in
         all_comments.iter().enumerate()
     {
         let number = i + 1;
@@ -486,6 +498,15 @@ fn generate_markdown(
         );
         for line in content_lines {
             let _ = writeln!(md, "{continuation_indent}{line}");
+        }
+        if let Some(original) = stale_text {
+            let _ = writeln!(
+                md,
+                "\n{continuation_indent}**Code changed since this comment (stale: true).** Original text:\n"
+            );
+            for line in *original {
+                let _ = writeln!(md, "{continuation_indent}    {line}");
+            }
         }
     }
 
@@ -642,7 +663,7 @@ mod tests {
                 42,
                 false,
             )],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(markdown.contains("## Comments"));
@@ -673,7 +694,7 @@ mod tests {
                 42,
                 false,
             )],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(!markdown.contains("## Local tuicr Comments"));
@@ -697,7 +718,7 @@ mod tests {
             &comment_types(),
             &export,
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(!markdown.contains("Reviewing unstaged changes"));
@@ -719,7 +740,7 @@ mod tests {
             &comment_types(),
             &export,
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(!markdown.contains("Reviewing pull request"));
@@ -741,7 +762,7 @@ mod tests {
             &comment_types(),
             &export,
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(markdown.contains("Reviewing pull request agavra/tuicr#125"));
@@ -765,7 +786,7 @@ mod tests {
             &comment_types(),
             &export,
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(!markdown.contains("Reviewing pull request"));
@@ -790,7 +811,7 @@ mod tests {
             &comment_types(),
             &export,
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(markdown.contains("Code review comments:"));
@@ -811,7 +832,7 @@ mod tests {
             &comment_types(),
             &export,
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(!markdown.contains("I reviewed your code"));
@@ -891,9 +912,10 @@ mod tests {
             &ExportConfig::default(),
         );
 
-        let message = export_to_file(&session, args.0, args.1, args.2, &[], None, &path).unwrap();
+        let header = ExportHeader::default();
+        let message = export_to_file(&session, args.0, args.1, args.2, &[], header, &path).unwrap();
 
-        let expected = generate_export_content(&session, args.0, args.1, args.2, &[], None);
+        let expected = generate_export_content(&session, args.0, args.1, args.2, &[], header);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected.unwrap());
         assert_eq!(message, format!("Review written to {}", path.display()));
     }
@@ -908,7 +930,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
             &path,
         );
         assert!(matches!(result, Err(TuicrError::Io(_))));
@@ -930,7 +952,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
             &path,
         );
         assert!(matches!(result, Err(TuicrError::NoComments)));
@@ -948,7 +970,10 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            Some("agavra/tuicr@main/worktree"),
+            ExportHeader {
+                session_slug: Some("agavra/tuicr@main/worktree"),
+                ..ExportHeader::default()
+            },
         );
 
         assert!(
@@ -972,7 +997,10 @@ mod tests {
             &comment_types(),
             &export,
             &[],
-            Some("agavra/tuicr@main/worktree"),
+            ExportHeader {
+                session_slug: Some("agavra/tuicr@main/worktree"),
+                ..ExportHeader::default()
+            },
         );
 
         assert!(
@@ -992,7 +1020,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(!markdown.contains("## Session:"));
@@ -1011,7 +1039,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         // then
@@ -1074,7 +1102,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(
@@ -1117,7 +1145,7 @@ mod tests {
             &custom_types,
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(markdown.contains("Comment types: QUESTION (ask for clarification)"));
@@ -1137,7 +1165,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         // then
@@ -1169,7 +1197,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         let expected = "\
@@ -1212,7 +1240,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         let expected = "\
@@ -1240,7 +1268,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(markdown
@@ -1262,7 +1290,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(markdown.contains(
@@ -1292,7 +1320,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(
@@ -1311,7 +1339,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         // Existing comments have commit_id = None — no (commit ...) suffix
@@ -1339,7 +1367,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         // then
@@ -1360,7 +1388,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         // then
@@ -1369,6 +1397,7 @@ mod tests {
         assert!(content.contains("I reviewed your code"));
         assert!(content.contains("[SUGGESTION]"));
         assert!(content.contains("[ISSUE]"));
+        assert!(!content.contains("Reviewed with a guide:"));
     }
 
     #[test]
@@ -1389,12 +1418,40 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         // then
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), TuicrError::NoComments));
+    }
+
+    #[test]
+    fn coverage_note_is_one_line_below_the_intro_and_preserves_numbered_comments() {
+        let note = "Reviewed with a guide: verified 1 of 2 stops.";
+        let session = create_test_session();
+        let diff = DiffSource::WorkingTree;
+        let config = ExportConfig::default();
+        let types = comment_types();
+        let render = |coverage_note| {
+            generate_export_content(
+                &session,
+                &diff,
+                &types,
+                &config,
+                &[],
+                ExportHeader {
+                    coverage_note,
+                    ..ExportHeader::default()
+                },
+            )
+            .unwrap()
+        };
+        let plain = render(None);
+        let guided = render(Some(note));
+        assert!(guided.starts_with(&format!("{}\n\n{note}\n\n", config.intro())));
+        assert_eq!(guided.matches(note).count(), 1);
+        assert_eq!(guided.replacen(&format!("{note}\n\n"), "", 1), plain);
     }
 
     #[test]
@@ -1413,7 +1470,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         // then
@@ -1433,7 +1490,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         // then
@@ -1501,7 +1558,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
         let mut buffer: Vec<u8> = Vec::new();
 
@@ -1550,7 +1607,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         // then
@@ -1590,7 +1647,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         // then
@@ -1630,7 +1687,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         // then
@@ -1669,7 +1726,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         // then
@@ -1708,7 +1765,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         // then
@@ -1726,7 +1783,7 @@ mod tests {
             &comment_types(),
             &legend_off(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(!markdown.contains("Comment types:"));
@@ -1757,7 +1814,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(markdown.contains("Comment types: PRAISE (positive feedback)"));
@@ -1800,7 +1857,7 @@ mod tests {
             &none_only,
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         // No `[TYPE]` marker on the comment and no legend line at all.
@@ -1898,7 +1955,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &threads,
-            None,
+            ExportHeader::default(),
         );
 
         // then
@@ -1934,7 +1991,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[thread],
-            None,
+            ExportHeader::default(),
         );
 
         // then — a reader must not take it for a posted comment
@@ -1980,7 +2037,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &threads,
-            None,
+            ExportHeader::default(),
         );
 
         // then every continuation is indented under its marker; no raw \r
@@ -2032,7 +2089,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &[thread],
-            None,
+            ExportHeader::default(),
         );
 
         // then nothing escapes its list item
@@ -2066,7 +2123,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &threads,
-            None,
+            ExportHeader::default(),
         );
 
         // then — export succeeds even with no local comments
@@ -2104,7 +2161,7 @@ mod tests {
             &comment_types(),
             &ExportConfig::default(),
             &threads,
-            None,
+            ExportHeader::default(),
         );
 
         // then — the section is omitted in non-PR modes
@@ -2149,7 +2206,7 @@ mod tests {
             &custom_types,
             &ExportConfig::default(),
             &[],
-            None,
+            ExportHeader::default(),
         );
 
         assert!(markdown.contains("Comment types: QUESTION (ask for clarification)"));

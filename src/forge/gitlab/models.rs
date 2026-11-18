@@ -64,6 +64,8 @@ pub struct GlabMrSummary {
     #[serde(default)]
     pub source_branch: String,
     #[serde(default)]
+    pub sha: Option<String>,
+    #[serde(default)]
     pub target_branch: String,
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
@@ -83,6 +85,7 @@ impl GlabMrSummary {
             title: self.title,
             author: self.author.map(|a| a.username),
             head_ref_name: self.source_branch,
+            head_sha: self.sha,
             base_ref_name: self.target_branch,
             updated_at: self.updated_at,
             last_commit_at: None,

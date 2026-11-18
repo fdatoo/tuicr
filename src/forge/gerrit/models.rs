@@ -161,12 +161,14 @@ impl GerritChange {
         let url = self.web_url(web_base);
         let author = self.author_handle();
         let head_ref_name = self.head_ref();
+        let head_sha = self.current_revision.clone();
         PullRequestSummary {
             repository: repo.clone(),
             number: self.number,
             title: self.subject,
             author,
             head_ref_name,
+            head_sha,
             base_ref_name: self.branch,
             updated_at: at(&self.updated),
             last_commit_at: None,

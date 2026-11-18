@@ -151,6 +151,10 @@ fn default_author() -> String {
     DEFAULT_AUTHOR.to_string()
 }
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comment {
     pub id: String,
@@ -158,6 +162,13 @@ pub struct Comment {
     pub comment_type: CommentType,
     pub created_at: DateTime<Utc>,
     pub line_context: Option<LineContext>,
+    /// Source text captured for a local line/range anchor. The map key still
+    /// determines the location; an empty vector means no text was captured.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub original_text: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stale: bool,
+
     /// Which side of the diff this comment belongs to (for line comments)
     /// None for file-level comments, defaults to New for backward compatibility
     #[serde(default)]
@@ -202,6 +213,8 @@ impl Comment {
             comment_type,
             created_at: Utc::now(),
             line_context: None,
+            original_text: Vec::new(),
+            stale: false,
             side,
             line_range: None,
             author: default_author(),
@@ -225,6 +238,8 @@ impl Comment {
             comment_type,
             created_at: Utc::now(),
             line_context: None,
+            original_text: Vec::new(),
+            stale: false,
             side,
             line_range: Some(line_range),
             author: default_author(),
@@ -250,6 +265,14 @@ impl Comment {
     pub fn with_commit_id(mut self, commit_id: impl Into<String>) -> Self {
         self.commit_id = Some(commit_id.into());
         self
+    }
+
+    pub(crate) fn display_content(&self) -> std::borrow::Cow<'_, str> {
+        if self.stale {
+            format!("Code changed since this comment\n\n{}", self.content).into()
+        } else {
+            (&self.content[..]).into()
+        }
     }
 
     /// True if this comment has been pushed/submitted to the forge and is

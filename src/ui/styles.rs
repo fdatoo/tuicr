@@ -11,6 +11,26 @@ pub fn dim_style(theme: &Theme) -> Style {
     Style::default().fg(theme.fg_dim)
 }
 
+pub(crate) struct ReviewEmphasis {
+    pub primary: Style,
+    pub secondary: Style,
+    pub muted: Style,
+}
+
+pub(crate) fn review_emphasis(theme: &Theme) -> ReviewEmphasis {
+    ReviewEmphasis {
+        primary: Style::default().fg(theme.fg_primary),
+        secondary: Style::default().fg(theme.fg_secondary),
+        muted: dim_style(theme),
+    }
+}
+
+pub(crate) fn review_warning(theme: &Theme) -> Style {
+    // The warning badge's foreground is often black; `pending` is the
+    // theme's warning ink designed for use directly on the panel.
+    Style::default().fg(theme.pending)
+}
+
 pub fn diff_add_style(theme: &Theme) -> Style {
     Style::default().fg(theme.diff_add).bg(theme.diff_add_bg)
 }
@@ -99,6 +119,101 @@ pub fn border_style(theme: &Theme, focused: bool) -> Style {
 
 pub fn panel_style(theme: &Theme) -> Style {
     Style::default().bg(theme.panel_bg).fg(theme.fg_primary)
+}
+
+pub(super) fn contrast_ratio(a: f64, b: f64) -> f64 {
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+pub(super) fn relative_luminance(color: Color) -> Option<f64> {
+    linear_rgb(color).map(luminance)
+}
+
+fn srgb(color: Color) -> Option<[u8; 3]> {
+    Some(match color {
+        Color::Rgb(r, g, b) => [r, g, b],
+        Color::Black => [0, 0, 0],
+        Color::White => [255, 255, 255],
+        Color::Indexed(index @ 16..=231) => {
+            let n = index - 16;
+            let component = |n: u8| if n == 0 { 0 } else { 55 + 40 * n };
+            [component(n / 36), component(n / 6 % 6), component(n % 6)]
+        }
+        Color::Indexed(index @ 232..=255) => [8 + 10 * (index - 232); 3],
+        // The first 16 ANSI colors and the default foreground/background can
+        // be remapped by the terminal. Do not invent RGB values for them.
+        _ => return None,
+    })
+}
+
+pub(super) fn linear_rgb(color: Color) -> Option<[f64; 3]> {
+    Some(srgb(color)?.map(|n| {
+        let n = f64::from(n) / 255.0;
+        if n <= 0.04045 {
+            n / 12.92
+        } else {
+            ((n + 0.055) / 1.055).powf(2.4)
+        }
+    }))
+}
+
+pub(super) fn luminance([r, g, b]: [f64; 3]) -> f64 {
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+fn mix_toward(source: [u8; 3], panel: [u8; 3], percent: u8) -> Color {
+    let mix = |a, b| {
+        let percent = u16::from(percent);
+        ((u16::from(a) * (100 - percent) + u16::from(b) * percent + 50) / 100) as u8
+    };
+    Color::Rgb(
+        mix(source[0], panel[0]),
+        mix(source[1], panel[1]),
+        mix(source[2], panel[2]),
+    )
+}
+
+/// Dim against the panel, but don't push already-muted ink below its original
+/// contrast or otherwise push readable ink below 4.5:1.
+pub(super) fn guide_surround_colors(fg: Color, bg: Color, panel: Color) -> (Color, Color) {
+    let Some(panel_rgb) = srgb(panel) else {
+        return (fg, bg);
+    };
+    let muted_bg = srgb(bg).map_or(bg, |rgb| mix_toward(rgb, panel_rgb, 50));
+    let rendered_luma =
+        |color| relative_luminance(if color == Color::Reset { panel } else { color });
+    let (Some(ink), Some(ink_luma), Some(old_luma), Some(new_luma)) = (
+        srgb(fg),
+        relative_luminance(fg),
+        rendered_luma(bg),
+        rendered_luma(muted_bg),
+    ) else {
+        return (fg, muted_bg);
+    };
+    let target = 4.5_f64.min(contrast_ratio(ink_luma, old_luma));
+    if contrast_ratio(ink_luma, new_luma) < target {
+        return (fg, bg);
+    }
+    // Test real terminal RGB colors after rounding, and leave very quiet
+    // text alone if it is already at the contrast floor.
+    let mut lo = 0;
+    let mut hi = 51;
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        let mixed = mix_toward(ink, panel_rgb, mid);
+        let luma = relative_luminance(mixed).expect("RGB blend has a luminance");
+        if contrast_ratio(luma, new_luma) >= target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let muted_fg = if lo == 0 {
+        fg
+    } else {
+        mix_toward(ink, panel_rgb, lo)
+    };
+    (muted_fg, muted_bg)
 }
 
 pub fn popup_style(theme: &Theme) -> Style {
@@ -230,6 +345,21 @@ pub fn pseudo_commit_tag_style(theme: &Theme) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_emphasis_orders_contrast_and_keeps_inline_warnings_legible() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let tone = review_emphasis(&theme);
+            let panel = relative_luminance(theme.palette_panel_bg()).unwrap();
+            let contrast = |style: Style| {
+                contrast_ratio(panel, relative_luminance(style.fg.unwrap()).unwrap())
+            };
+            assert!(contrast(tone.primary) > contrast(tone.secondary));
+            assert!(contrast(tone.secondary) > contrast(tone.muted));
+            assert!(contrast(tone.muted) >= 4.5);
+            assert!(contrast(review_warning(&theme)) >= 4.5);
+        }
+    }
 
     /// A syntax-colored line's change bar takes the syntax background; an
     /// uncolored line's keeps the plain diff background.

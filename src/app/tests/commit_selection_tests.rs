@@ -555,6 +555,48 @@ fn should_comment_on_a_commit_only_file_after_narrowing_the_commit_pane() {
 }
 
 #[test]
+fn should_refresh_wheel_bounds_when_clearing_the_inline_commit_selection() {
+    use crate::model::comment::{CommentType, LineSide};
+    use crate::review_store::{AddCommentRequest, CommentTarget, add_comment_to_session};
+
+    let mut app = build_app(vec![normal_commit("c2"), normal_commit("c1")]);
+    app.input_mode = InputMode::Normal;
+    app.review_commits = app.commit_list.clone();
+    let path = PathBuf::from("src/shared.rs");
+    app.commit_diff_cache
+        .insert((0, 0), vec![commit_only_file(&path, vec![one_line_hunk()])]);
+    app.commit_selection_range = Some((0, 0));
+    app.reload_inline_selection()
+        .expect("narrowing should load");
+    add_comment_to_session(
+        &mut app.session,
+        AddCommentRequest {
+            target: CommentTarget::Line {
+                path,
+                line: 1,
+                side: LineSide::New,
+            },
+            content: "comment from the other commit".to_string(),
+            comment_type: CommentType::from_id("note"),
+            author: "user".to_string(),
+            commit_id: Some("c1".to_string()),
+        },
+    )
+    .unwrap();
+    app.rebuild_annotations();
+    let narrowed_height = app.line_annotations.len();
+    assert_eq!(narrowed_height, app.total_lines());
+
+    app.commit_selection_range = None;
+    app.reload_inline_selection().unwrap();
+    let expanded_height = app.total_lines();
+    assert!(expanded_height > narrowed_height);
+    assert_eq!(app.line_annotations.len(), expanded_height);
+    app.scroll_view_down(expanded_height);
+    assert_eq!(app.diff_state.scroll_offset, expanded_height - 1);
+}
+
+#[test]
 fn is_diff_sole_pane_only_when_no_other_panes_visible() {
     let mut app = build_app(vec![normal_commit("a"), normal_commit("b")]);
     app.review_commits = app.commit_list.clone();

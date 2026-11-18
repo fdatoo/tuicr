@@ -40,6 +40,7 @@ pub struct Theme {
 
     // Base colors
     pub panel_bg: Color,
+    opaque_panel_bg: Option<Color>,
     pub bg_highlight: Color,
     pub fg_primary: Color,
     pub fg_secondary: Color,
@@ -113,6 +114,7 @@ impl Clone for Theme {
             highlighter: OnceLock::new(),
             selection_marker: self.selection_marker,
             panel_bg: self.panel_bg,
+            opaque_panel_bg: self.opaque_panel_bg,
             bg_highlight: self.bg_highlight,
             fg_primary: self.fg_primary,
             fg_secondary: self.fg_secondary,
@@ -174,6 +176,7 @@ impl Theme {
 
             // Base colors
             panel_bg: Color::Rgb(24, 24, 28),
+            opaque_panel_bg: None,
             bg_highlight: Color::Rgb(70, 70, 70),
             fg_primary: Color::White,
             fg_secondary: Color::Rgb(210, 210, 210),
@@ -245,6 +248,7 @@ impl Theme {
 
             // Base colors - dark text on light background
             panel_bg: Color::Rgb(245, 243, 232),
+            opaque_panel_bg: None,
             bg_highlight: Color::Rgb(200, 200, 220),
             fg_primary: Color::Rgb(0, 0, 0),
             fg_secondary: Color::Rgb(30, 30, 30),
@@ -330,6 +334,7 @@ impl Theme {
             selection_marker: None,
 
             panel_bg: base3,
+            opaque_panel_bg: None,
             bg_highlight: base2,
             fg_primary: base00,
             fg_secondary: base01,
@@ -404,6 +409,7 @@ impl Theme {
             selection_marker: None,
 
             panel_bg: base03,
+            opaque_panel_bg: None,
             bg_highlight: base02,
             fg_primary: base0,
             fg_secondary: base00,
@@ -561,6 +567,7 @@ impl Theme {
 
             // Base colors
             panel_bg: Color::Rgb(250, 250, 250),
+            opaque_panel_bg: None,
             bg_highlight: Color::Rgb(240, 238, 228),
             fg_primary: Color::Rgb(92, 103, 115),
             fg_secondary: Color::Rgb(107, 118, 130),
@@ -652,6 +659,7 @@ impl Theme {
             selection_marker: None,
 
             panel_bg: bg,
+            opaque_panel_bg: None,
             bg_highlight: selection,
             fg_primary: fg,
             fg_secondary,
@@ -714,6 +722,7 @@ impl Theme {
 
             // Base colors
             panel_bg: Color::Rgb(40, 44, 52),
+            opaque_panel_bg: None,
             bg_highlight: Color::Rgb(62, 68, 82),
             fg_primary: Color::Rgb(171, 178, 191),
             fg_secondary: Color::Rgb(192, 198, 208),
@@ -784,6 +793,7 @@ impl Theme {
             selection_marker: None,
 
             panel_bg: Color::Rgb(255, 255, 255),
+            opaque_panel_bg: None,
             bg_highlight: Color::Rgb(221, 244, 255),
             fg_primary: Color::Rgb(31, 35, 40),
             fg_secondary: Color::Rgb(89, 99, 110),
@@ -845,6 +855,7 @@ impl Theme {
             selection_marker: None,
 
             panel_bg: Color::Rgb(13, 17, 23),
+            opaque_panel_bg: None,
             bg_highlight: Color::Rgb(33, 38, 45),
             fg_primary: Color::Rgb(230, 237, 243),
             fg_secondary: Color::Rgb(201, 209, 217),
@@ -905,6 +916,7 @@ impl Theme {
             highlighter: OnceLock::new(),
             selection_marker: None,
             panel_bg: Color::Rgb(0x0d, 0x11, 0x17),
+            opaque_panel_bg: None,
             bg_highlight: Color::Rgb(0x1e, 0x42, 0x73),
             fg_primary: Color::Rgb(0xf0, 0xf6, 0xfc),
             fg_secondary: Color::Rgb(0x91, 0x98, 0xa1),
@@ -982,6 +994,7 @@ impl Theme {
             selection_marker: None,
 
             panel_bg: bg,
+            opaque_panel_bg: None,
             bg_highlight,
             fg_primary: fg,
             fg_secondary: fg_dark,
@@ -1060,6 +1073,7 @@ impl Theme {
             selection_marker: None,
 
             panel_bg: bg,
+            opaque_panel_bg: None,
             bg_highlight,
             fg_primary: fg,
             fg_secondary: fg_dark,
@@ -1427,6 +1441,7 @@ fn catppuccin_theme(flavor: CatppuccinFlavor, syntect_theme: EmbeddedThemeName) 
 
         // Base colors
         panel_bg: flavor.base,
+        opaque_panel_bg: None,
         bg_highlight: flavor.surface1,
         fg_primary: flavor.text,
         fg_secondary: flavor.subtext1,
@@ -1504,6 +1519,7 @@ fn gruvbox_theme(flavor: GruvboxFlavor) -> Theme {
 
         // Base colors
         panel_bg: flavor.bg0,
+        opaque_panel_bg: None,
         bg_highlight: flavor.selected_bg,
         fg_primary: flavor.fg0,
         fg_secondary: flavor.fg1,
@@ -1577,6 +1593,7 @@ fn everforest_theme(flavor: EverforestFlavor) -> Theme {
         selection_marker: None,
 
         panel_bg: flavor.bg0,
+        opaque_panel_bg: None,
         bg_highlight: flavor.bg3,
         fg_primary: flavor.fg,
         fg_secondary: flavor.grey2,
@@ -1643,6 +1660,7 @@ fn nord_theme(flavor: NordFlavor) -> Theme {
         selection_marker: None,
 
         panel_bg: flavor.bg0,
+        opaque_panel_bg: None,
         bg_highlight: flavor.bg1,
         fg_primary: flavor.fg0,
         fg_secondary: flavor.fg1,
@@ -2260,6 +2278,7 @@ fn load_local_theme_from_path(path: &Path) -> Result<(Theme, Vec<String>), Strin
             .map(|_| require_local_theme_color(table, "selection_marker"))
             .transpose()?,
         panel_bg,
+        opaque_panel_bg: None,
         bg_highlight: require_local_theme_color(table, "bg_highlight")?,
         fg_primary: require_local_theme_color(table, "fg_primary")?,
         fg_secondary: require_local_theme_color(table, "fg_secondary")?,
@@ -2534,8 +2553,15 @@ impl Theme {
     /// (`transparent_background`). Apply to every resolved theme, not just
     /// the startup one.
     pub fn with_transparent_background(mut self) -> Self {
+        self.opaque_panel_bg.get_or_insert(self.panel_bg);
         self.panel_bg = Color::Reset;
         self
+    }
+
+    /// Color calculations still need the theme's intended backdrop when
+    /// rendering leaves the terminal's own background visible.
+    pub(crate) fn palette_panel_bg(&self) -> Color {
+        self.opaque_panel_bg.unwrap_or(self.panel_bg)
     }
 
     pub fn section_highlight_bg(&self) -> Color {

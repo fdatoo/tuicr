@@ -242,10 +242,35 @@ pub(super) static EMPTY_LINE_COMMENTS: std::sync::LazyLock<
     std::collections::HashMap<u32, Vec<Comment>>,
 > = std::sync::LazyLock::new(std::collections::HashMap::new);
 
-/// Compute the half-open `line_idx` range whose diff-line spans must be fully
-/// built this frame. Outside this range the hot loops push `Line::default()`
-/// placeholders so the bulk of per-line allocations are skipped.
-///
+pub(super) fn sync_diff_viewport(app: &mut App, inner: Rect) -> Option<crate::app::GuideViewport> {
+    let changed = app.diff_state.viewport_height != usize::from(inner.height)
+        || app.diff_state.viewport_width != usize::from(inner.width);
+    if changed {
+        app.keep_guide_stop_in_view();
+    }
+    app.diff_inner_area = Some(inner);
+    app.diff_state.viewport_height = usize::from(inner.height);
+    app.sync_viewport_width(usize::from(inner.width));
+    app.keep_companion_code_visible(changed);
+    if inner.is_empty() {
+        None
+    } else {
+        app.prepare_guide_viewport()
+    }
+}
+
+pub(super) fn diff_has_border(app: &App, area: Rect) -> bool {
+    let minimum = 2 + u16::from(app.diff_state.wrap_lines);
+    !app.is_diff_sole_pane()
+        && (area.height > minimum || app.current_stop().is_none())
+        && !(app.input_mode == crate::app::InputMode::Companion
+            && app.diff_state.wrap_lines
+            && app.guide_cursor_in_stop()
+            && app.guide_first_row_height(usize::from(area.width.saturating_sub(2)))
+                > area.height.saturating_sub(2))
+}
+
+/// Compute the half-open range of logical rows to retain this frame.
 /// In Comment mode the scroll offset may still be adjusted after building (to
 /// keep the inline input box visible), so fall back to building everything.
 pub(super) fn diff_visible_range(app: &App, inner: Rect) -> (usize, usize) {
@@ -254,6 +279,69 @@ pub(super) fn diff_visible_range(app: &App, inner: Rect) -> (usize, usize) {
     } else {
         let start = app.diff_state.scroll_offset;
         (start, start.saturating_add(inner.height as usize))
+    }
+}
+
+/// Tracks the whole document's logical positions while storing only the rows
+/// this frame will use. In the inline editor the viewport can move mid-render,
+/// so its range deliberately retains every row.
+pub(crate) struct DiffRows<'a> {
+    range: std::ops::Range<usize>,
+    end: usize,
+    rows: Vec<Line<'a>>,
+}
+
+impl<'a> DiffRows<'a> {
+    pub(crate) fn new((start, end): (usize, usize)) -> Self {
+        Self {
+            range: start..end,
+            end: 0,
+            rows: Vec::new(),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.end
+    }
+
+    pub(super) fn push(&mut self, line: Line<'a>) {
+        if self.range.contains(&self.end) {
+            self.rows.push(line);
+        }
+        self.end += 1;
+    }
+
+    pub(super) fn skip(&mut self, count: usize) {
+        let end = self.end + count;
+        let retained = end
+            .min(self.range.end)
+            .saturating_sub(self.end.max(self.range.start));
+        if retained > 0 {
+            self.rows
+                .resize_with(self.rows.len() + retained, Line::default);
+        }
+        self.end = end;
+    }
+
+    /// Item indices inside the retained window for a one-row-per-item run
+    /// about to be appended.
+    pub(super) fn visible_run(&self, count: usize) -> std::ops::Range<usize> {
+        let end = self.end + count;
+        let first = self.range.start.clamp(self.end, end);
+        let last = self.range.end.clamp(first, end);
+        (first - self.end)..(last - self.end)
+    }
+
+    pub(crate) fn get(&self, idx: usize) -> Option<&Line<'a>> {
+        self.rows.get(idx.checked_sub(self.range.start)?)
+    }
+
+    pub(crate) fn into_visible(self, scroll_offset: usize, height: usize) -> Vec<Line<'a>> {
+        let first = scroll_offset.saturating_sub(self.range.start);
+        if first == 0 && self.rows.len() <= height {
+            return self.rows;
+        }
+        self.rows.into_iter().skip(first).take(height).collect()
     }
 }
 
@@ -377,7 +465,7 @@ pub(super) fn cursor_indicator(line_idx: usize, current_line_idx: usize) -> &'st
 /// emits their rows. No comment bar is drawn: there is no diff row above
 /// the box to connect to; the box header carries the `L<n>` label instead.
 pub(super) fn render_remote_threads_outside_hunks(
-    lines: &mut Vec<Line<'_>>,
+    lines: &mut DiffRows<'_>,
     line_idx: &mut usize,
     current_line_idx: usize,
     app: &App,
@@ -429,7 +517,7 @@ pub(super) fn hunk_header_text_and_style(
 
 /// Render an expander line with direction arrow
 pub(super) fn render_expander_line(
-    lines: &mut Vec<Line<'_>>,
+    lines: &mut DiffRows<'_>,
     line_idx: &mut usize,
     current_line_idx: usize,
     direction: ExpandDirection,
@@ -449,7 +537,7 @@ pub(super) fn render_expander_line(
 
 /// Render a "N lines hidden" informational line
 pub(super) fn render_hidden_lines(
-    lines: &mut Vec<Line<'_>>,
+    lines: &mut DiffRows<'_>,
     line_idx: &mut usize,
     current_line_idx: usize,
     count: usize,
@@ -566,6 +654,48 @@ pub(super) fn populate_row_to_annotation(
             out.push(scroll_offset + i);
         }
         viewport_height
+    }
+}
+
+/// Paint in an existing gutter space without changing selection or code columns.
+pub(super) fn paint_private_thread_marks(
+    frame: &mut Frame,
+    inner: Rect,
+    app: &App,
+    number_width: usize,
+    sbs_content_width: Option<u16>,
+) {
+    if !app.has_companion_gutter_marks() {
+        return;
+    }
+    let [old_col, new_col] = if let Some(width) = sbs_content_width {
+        [
+            Some(crate::app::sbs_left_gutter(number_width) - 2),
+            Some(crate::app::sbs_overhead(number_width) + width - 2),
+        ]
+    } else {
+        let marker = usize::from(crate::app::unified_gutter(number_width) - 1);
+        let marker = marker
+            .checked_sub(app.diff_state.scroll_x)
+            .map(|x| x as u16);
+        [marker; 2]
+    };
+    let mut previous = None;
+    for (row, &annotation) in app.diff_row_to_annotation.iter().enumerate() {
+        if previous.replace(annotation) == Some(annotation) {
+            continue;
+        }
+        let (old, new) = app.companion_gutter_marks(annotation);
+        for (marked, col) in [(old, old_col), (new, new_col)] {
+            if marked
+                && let Some(col) = col.filter(|col| *col < inner.width)
+                && let Some(cell) = frame
+                    .buffer_mut()
+                    .cell_mut((inner.x + col, inner.y + row as u16))
+            {
+                cell.set_symbol("◆").set_fg(app.theme.fg_primary);
+            }
+        }
     }
 }
 
@@ -948,14 +1078,13 @@ pub(super) fn comment_box_visible(top: usize, rows: usize, visible: (usize, usiz
     top < visible_end && top.saturating_add(rows) > visible_start
 }
 
-/// Stand in for an off-screen comment box with `rows` blank rows, so
-/// `lines.len()` and `line_idx` stay exact without paying for its spans.
+/// Advance across a comment box whose text this frame doesn't need.
 ///
 /// `rows` comes from `App::comment_display_lines`, the same mirror the
 /// annotation builder uses to keep `line_annotations` aligned with the rendered
 /// document — if it were ever wrong, navigation would already be broken.
-pub(super) fn skip_comment_box(lines: &mut Vec<Line<'_>>, line_idx: &mut usize, rows: usize) {
-    lines.extend(std::iter::repeat_with(Line::default).take(rows));
+pub(super) fn skip_comment_box(lines: &mut DiffRows<'_>, line_idx: &mut usize, rows: usize) {
+    lines.skip(rows);
     *line_idx += rows;
 }
 
@@ -1297,7 +1426,7 @@ pub(super) struct ReviewSectionState {
 
 /// Prefix each row with the cursor gutter marker and append it.
 pub(super) fn push_with_indicator<'a>(
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut DiffRows<'a>,
     line_idx: &mut usize,
     current_line_idx: usize,
     theme: &Theme,
@@ -1320,7 +1449,7 @@ pub(super) fn push_with_indicator<'a>(
 /// input box. `comment_width` is the text width of comment boxes.
 pub(super) fn append_review_comments_section<'a>(
     app: &App,
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut DiffRows<'a>,
     line_idx: &mut usize,
     current_line_idx: usize,
     panel_width: usize,
@@ -1360,13 +1489,18 @@ pub(super) fn append_review_comments_section<'a>(
     }
 
     let input_lines = |is_editing: bool| {
+        let mut presentation = comment_type_presentation(app, &app.comment_type);
+        let coverage_note = app.editing_coverage_note();
+        if coverage_note {
+            presentation.label = "COVERAGE NOTE".to_string();
+        }
         comment_panel::format_comment_input_lines(
             &app.theme,
-            comment_type_presentation(app, &app.comment_type),
+            presentation,
             &app.comment_buffer,
             app.comment_cursor,
             None,
-            is_editing,
+            is_editing || coverage_note,
             comment_width,
             app.comment_vim_mode_label()
                 .as_ref()
@@ -1454,7 +1588,7 @@ pub(super) enum FileBody {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn append_file_preamble<'a>(
     app: &App,
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut DiffRows<'a>,
     line_idx: &mut usize,
     current_line_idx: usize,
     file_idx: usize,
@@ -1584,14 +1718,14 @@ pub(super) fn append_file_preamble<'a>(
 #[allow(clippy::too_many_arguments)]
 fn append_gap_runs<'a>(
     app: &App,
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut DiffRows<'a>,
     line_idx: &mut usize,
     current_line_idx: usize,
     visible: (usize, usize),
     gap_id: GapId,
     gap: usize,
     stubs: GapStubs,
-    render: &mut impl FnMut(&mut Vec<Line<'a>>, &mut usize, &DiffLine),
+    render: &mut impl FnMut(&mut DiffRows<'a>, &mut usize, &DiffLine),
 ) {
     let top_lines = app.expanded_top.get(&gap_id);
     let bot_lines = app.expanded_bottom.get(&gap_id);
@@ -1605,7 +1739,7 @@ fn append_gap_runs<'a>(
     }
 
     if remaining > 0 {
-        let expander = |lines: &mut Vec<Line<'a>>, line_idx: &mut usize, dir| {
+        let expander = |lines: &mut DiffRows<'a>, line_idx: &mut usize, dir| {
             render_expander_line(lines, line_idx, current_line_idx, dir, remaining, theme);
         };
         match stubs {
@@ -1651,14 +1785,14 @@ enum GapStubs {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn append_gap_and_hunk_header<'a>(
     app: &App,
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut DiffRows<'a>,
     line_idx: &mut usize,
     current_line_idx: usize,
     visible: (usize, usize),
     file: &DiffFile,
     file_idx: usize,
     hunk_idx: usize,
-    mut render: impl FnMut(&mut Vec<Line<'a>>, &mut usize, &DiffLine),
+    mut render: impl FnMut(&mut DiffRows<'a>, &mut usize, &DiffLine),
 ) -> bool {
     let hunk = &file.hunks[hunk_idx];
     let prev_hunk = hunk_idx.checked_sub(1).and_then(|i| file.hunks.get(i));
@@ -1703,13 +1837,13 @@ pub(super) fn append_gap_and_hunk_header<'a>(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn append_eof_gap<'a>(
     app: &App,
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut DiffRows<'a>,
     line_idx: &mut usize,
     current_line_idx: usize,
     visible: (usize, usize),
     file: &DiffFile,
     file_idx: usize,
-    mut render: impl FnMut(&mut Vec<Line<'a>>, &mut usize, &DiffLine),
+    mut render: impl FnMut(&mut DiffRows<'a>, &mut usize, &DiffLine),
 ) {
     if file.status == FileStatus::Deleted || !app.eof_gap_enabled() {
         return;
@@ -1739,24 +1873,23 @@ pub(super) fn append_eof_gap<'a>(
 }
 
 /// Render a run of one-row-per-item lines, building only the rows inside
-/// `visible` (`start..end` in logical line indices). Rows outside it become
-/// blank placeholders in bulk, so a huge expansion costs O(viewport).
+/// `visible` (`start..end` in logical line indices).
 pub(super) fn render_culled_run<'a, T>(
-    lines: &mut Vec<Line<'a>>,
+    lines: &mut DiffRows<'a>,
     line_idx: &mut usize,
     items: &[T],
     visible: (usize, usize),
-    mut render: impl FnMut(&mut Vec<Line<'a>>, &mut usize, &T),
+    mut render: impl FnMut(&mut DiffRows<'a>, &mut usize, &T),
 ) {
     let end = *line_idx + items.len();
     let first = visible.0.clamp(*line_idx, end) - *line_idx;
     let last = visible.1.clamp(*line_idx + first, end) - *line_idx;
-    lines.resize(lines.len() + first, Line::default());
+    lines.skip(first);
     *line_idx += first;
     for item in &items[first..last] {
         render(lines, line_idx, item);
     }
-    lines.resize(lines.len() + items.len() - last, Line::default());
+    lines.skip(items.len() - last);
     *line_idx = end;
 }
 
@@ -1777,7 +1910,8 @@ mod tests {
     #[test]
     fn should_build_only_visible_rows_of_a_culled_run() {
         // given - 10 rows starting at logical line 2, viewport 5..8
-        let mut lines: Vec<Line> = vec![Line::default(); 2];
+        let mut lines = DiffRows::new((5, 8));
+        lines.skip(2);
         let mut line_idx = 2;
         let mut built = Vec::new();
         // when
@@ -1796,23 +1930,27 @@ mod tests {
         assert_eq!(built, vec![5, 6, 7]);
         assert_eq!(lines.len(), 12);
         assert_eq!(line_idx, 12);
-        assert_eq!(lines[5].spans.len(), 1);
-        assert!(lines[4].spans.is_empty() && lines[8].spans.is_empty());
+        assert!(lines.get(4).is_none() && lines.get(8).is_none());
+        assert_eq!(lines.into_visible(5, 3), vec![Line::from("x"); 3]);
     }
 
     #[test]
     fn should_build_nothing_for_a_run_outside_the_viewport() {
-        let mut lines: Vec<Line> = Vec::new();
+        let mut lines = DiffRows::new((10, 20));
         let mut line_idx = 0;
         let mut calls = 0;
         render_culled_run(&mut lines, &mut line_idx, &[0; 4], (10, 20), |_, _, _| {
             calls += 1
         });
         assert_eq!((calls, lines.len(), line_idx), (0, 4, 4));
+        assert!(lines.into_visible(10, 10).is_empty());
+        let mut lines = DiffRows::new((0, 2));
+        lines.skip(4);
         render_culled_run(&mut lines, &mut line_idx, &[0; 4], (0, 2), |_, _, _| {
             calls += 1
         });
         assert_eq!((calls, lines.len(), line_idx), (0, 8, 8));
+        assert_eq!(lines.into_visible(0, 2), vec![Line::default(); 2]);
     }
 
     #[test]

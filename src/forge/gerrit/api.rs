@@ -34,7 +34,7 @@ use crate::forge::submit::{GhSide, InlineComment, SubmitEvent};
 use crate::forge::traits::{
     CreateReviewRequest, ForgeBackend, ForgeFileLinesRequest, ForgeRepository,
     GhCreateReviewResponse, PagedPullRequests, PullRequestCommit, PullRequestDetails,
-    PullRequestListQuery, PullRequestListScope, PullRequestTarget,
+    PullRequestInfo, PullRequestListQuery, PullRequestListScope, PullRequestTarget,
 };
 use crate::forge::{forge_path, percent_encode_component};
 use crate::model::FilePatch;
@@ -591,6 +591,14 @@ impl ForgeBackend for GerritBackend {
         let change = self.fetch_change(&repository, target.number)?;
         let base = web_base(&repository);
         Ok(change.into_details(&repository, &base))
+    }
+
+    fn get_pull_request_info(&self, target: PullRequestTarget) -> Result<PullRequestInfo> {
+        // The Gerrit diff below uses the reported patch-set parent directly.
+        Ok(PullRequestInfo {
+            base_sha_confirmed: true,
+            ..PullRequestInfo::from_details(self.get_pull_request(target)?)
+        })
     }
 
     fn get_pull_request_diff(&self, pr: &PullRequestDetails) -> Result<Vec<FilePatch>> {

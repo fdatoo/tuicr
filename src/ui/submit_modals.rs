@@ -10,17 +10,20 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::app::{App, SUBMIT_PICKER_EVENTS};
+use crate::app::App;
 use crate::forge::submit::{ResolverAction, SubmitEvent, UnmappableItem};
 use crate::ui::styles;
 use crate::ui::text_utils::wrap_spans;
 
-/// Render the bare-`:submit` action picker. Lists the available review
-/// events plus a Cancel row; the user picks one with j/k + Enter (or
-/// Esc to cancel).
+/// Pick a review action. With a guide, show coverage before any choice.
 pub fn render_submit_action_picker(frame: &mut Frame, app: &App) {
     let theme = &app.theme;
-    let area = centered_rect(40, 50, modal_anchor(app, frame.area()));
+    let coverage = app.coverage_record();
+    let area = if coverage.is_some() {
+        centered_rect(80, 70, frame.area())
+    } else {
+        centered_rect(40, 50, modal_anchor(app, frame.area()))
+    };
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -32,9 +35,51 @@ pub fn render_submit_action_picker(frame: &mut Frame, app: &App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    if let Some(coverage) = coverage {
+        let [summary, choices, footer] = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+        frame.render_widget(
+            Paragraph::new(
+                coverage
+                    .compact_summary()
+                    .into_iter()
+                    .map(Line::from)
+                    .collect::<Vec<_>>(),
+            )
+            .style(styles::popup_style(theme)),
+            summary,
+        );
+        let items = (0..)
+            .map_while(|index| app.submit_picker_label(index))
+            .map(ListItem::new);
+        frame.render_stateful_widget(
+            List::new(items)
+                .style(styles::popup_style(theme))
+                .highlight_symbol("> ")
+                .highlight_style(
+                    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+                ),
+            choices,
+            &mut ListState::default().with_selected(Some(app.submit_picker_cursor)),
+        );
+        frame.render_widget(
+            Paragraph::new("j/k choose · Enter continue · Esc cancel")
+                .style(styles::dim_style(theme)),
+            footer,
+        );
+        return;
+    }
+
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
-    for (i, (label, _)) in SUBMIT_PICKER_EVENTS.iter().enumerate() {
+    for (i, label) in (0..)
+        .map_while(|index| app.submit_picker_label(index))
+        .enumerate()
+    {
         let style = if i == app.submit_picker_cursor {
             Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
         } else {
@@ -136,7 +181,14 @@ pub fn render_submit_confirm(frame: &mut Frame, app: &App) {
     let Some(state) = app.submit_state.as_ref() else {
         return;
     };
-    let area = centered_rect(60, 70, modal_anchor(app, frame.area()));
+    let coverage_note = state.guide.as_ref().and_then(|guide| guide.note.as_deref());
+    let unverified = app.submit_unverified_risks();
+    let guided_preview = coverage_note.is_some() || unverified > 0;
+    let area = if guided_preview {
+        centered_rect(85, 85, frame.area())
+    } else {
+        centered_rect(60, 70, modal_anchor(app, frame.area()))
+    };
 
     frame.render_widget(Clear, area);
 
@@ -165,21 +217,46 @@ pub fn render_submit_confirm(frame: &mut Frame, app: &App) {
     let body_summary = body_summary_label(app, moved_count);
 
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(""));
-    if !matches!(state.event, SubmitEvent::Draft) {
-        lines.push(Line::from(format!(
-            "Event: {label}",
-            label = state.event.human_label()
+    if !guided_preview {
+        lines.push(Line::from(""));
+    }
+    if unverified > 0 {
+        let warning = if unverified == 1 {
+            "1 risk item is unverified. Approve anyway?".to_owned()
+        } else {
+            format!("{unverified} risk items are unverified. Approve anyway?")
+        };
+        lines.push(Line::from(Span::styled(
+            warning,
+            Style::default().fg(theme.message_warning_fg),
         )));
     }
-    lines.push(Line::from(format!("Inline: {n}", n = state.mappable.len())));
-    lines.push(Line::from(format!("Moved to summary: {moved_count}")));
-    lines.push(Line::from(format!("Omitted: {omit_count}")));
-    lines.push(Line::from(format!("Body: {body_summary}")));
-    lines.push(Line::from(format!(
-        "Head: {sha}",
-        sha = short_sha(&state.commit_id)
-    )));
+    if guided_preview {
+        lines.push(Line::from(format!(
+            "Event: {} · Head: {}",
+            state.event.human_label(),
+            short_sha(&state.commit_id)
+        )));
+        lines.push(Line::from(format!(
+            "Inline: {} · Moved to summary: {moved_count} · Omitted: {omit_count}",
+            state.mappable.len()
+        )));
+        if body_summary != "empty" {
+            lines.push(Line::from(format!("Body: {body_summary}")));
+        }
+    } else {
+        if !matches!(state.event, SubmitEvent::Draft) {
+            lines.push(Line::from(format!(
+                "Event: {label}",
+                label = state.event.human_label()
+            )));
+        }
+        lines.push(Line::from(format!("Inline: {n}", n = state.mappable.len())));
+        lines.push(Line::from(format!("Moved to summary: {moved_count}")));
+        lines.push(Line::from(format!("Omitted: {omit_count}")));
+        lines.push(Line::from(format!("Body: {body_summary}")));
+        lines.push(Line::from(format!("Head: {}", short_sha(&state.commit_id))));
+    }
 
     let stale = app.submit_head_is_stale();
     if stale {
@@ -213,6 +290,43 @@ pub fn render_submit_confirm(frame: &mut Frame, app: &App) {
             format!("It will not publish until you finish it in {forge}."),
             Style::default().fg(theme.fg_secondary),
         )));
+    }
+
+    if guided_preview {
+        if let Some(note) = coverage_note {
+            lines.push(Line::styled(
+                "Coverage note (end of review body)",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            if note.is_empty() {
+                lines.push(Line::styled(
+                    "No coverage note will be posted.",
+                    styles::dim_style(theme),
+                ));
+            } else {
+                lines.extend(note.lines().map(Line::from));
+            }
+        }
+        let [body, footer] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(styles::popup_style(theme))
+                .wrap(Wrap { trim: false }),
+            body,
+        );
+        let mut prompt = prompt_spans(stale, state.event);
+        if unverified > 0 {
+            prompt[1] = Span::raw("approve anyway    ");
+        }
+        if coverage_note.is_some() {
+            prompt.push(Span::raw("    [e] edit note"));
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(prompt)).style(styles::popup_style(theme)),
+            footer,
+        );
+        return;
     }
 
     lines.push(Line::from(""));
@@ -522,6 +636,7 @@ mod tests {
             commit_id: "abcdef0123".to_string(),
             base_commit_id: None,
             skip_confirm: false,
+            guide: None,
         });
         let text = buffer_text(&draw_resolver(&app));
         assert!(text.contains("> [x] Move to summary  file11.rs"), "{text}");
@@ -555,6 +670,7 @@ mod tests {
             commit_id: "abcdef0123".to_string(),
             base_commit_id: None,
             skip_confirm: false,
+            guide: None,
         });
         let buffer = draw_resolver(&app);
         let text = buffer_text(&buffer);
@@ -602,6 +718,7 @@ mod tests {
             commit_id: "abcdef0123".to_string(),
             base_commit_id: None,
             skip_confirm: false,
+            guide: None,
         });
         let text = buffer_text(&draw_resolver(&app));
         // The emoji spans two cells, so the buffer reads back with padding.
@@ -630,6 +747,7 @@ mod tests {
             commit_id: "abcdef0123".to_string(),
             base_commit_id: None,
             skip_confirm: false,
+            guide: None,
         });
         let buffer = draw_resolver(&app);
         let text = buffer_text(&buffer);
@@ -648,6 +766,7 @@ mod tests {
             commit_id: "abcdef0123".to_string(),
             base_commit_id: None,
             skip_confirm: false,
+            guide: None,
         });
         let buffer = draw_confirm(&app);
         let text = buffer_text(&buffer);
@@ -689,6 +808,7 @@ mod tests {
             commit_id: "abcdef0123".to_string(),
             base_commit_id: None,
             skip_confirm: false,
+            guide: None,
         });
         let buffer = draw_confirm(&app);
         let text = buffer_text(&buffer);
@@ -710,6 +830,7 @@ mod tests {
             commit_id: "abcdef0123".to_string(),
             base_commit_id: None,
             skip_confirm: false,
+            guide: None,
         });
         let buffer = draw_confirm(&app);
         let text = buffer_text(&buffer);
@@ -732,6 +853,7 @@ mod tests {
             commit_id: "abcdef0123".to_string(),
             base_commit_id: None,
             skip_confirm: false,
+            guide: None,
         });
         let buffer = draw_confirm(&app);
         let text = buffer_text(&buffer);
@@ -769,6 +891,7 @@ mod tests {
             commit_id: "abcdef0123".to_string(),
             base_commit_id: None,
             skip_confirm: false,
+            guide: None,
         });
         let buffer = draw_confirm(&app);
         let text = buffer_text(&buffer);
@@ -793,6 +916,7 @@ mod tests {
             commit_id: "abcdef0123".to_string(),
             base_commit_id: None,
             skip_confirm: false,
+            guide: None,
         });
         app
     }

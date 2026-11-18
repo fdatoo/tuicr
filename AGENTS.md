@@ -15,11 +15,48 @@ Repository-managed agent integration: `skills/tuicr/` (shared skill bundle that 
 - Before committing Python changes run `uvx ruff@0.15.16 format --check`, `uvx ruff@0.15.16 check` and `uvx ty@0.0.44 check` with `e2e/pyproject.toml` (exact commands and pinned versions as in CI: `CONTRIBUTING.md#python-checks`).
 - Scenarios are Python on the stdlib library `e2e/lib/e2e/` (`from e2e import scenario`); all scenarios are `.py`, never add a `.sh`. A known failure declares a module-level `QUARANTINE = "<reason>"`. Harness self-test: `uv run --python 3.12 e2e/selftest/run.py`.
 - Forges are always faked (`e2e/fakeforge/`, `e2e/bin/{gh,glab,tea,bkt}`, fake Gerrit). Never call a real forge, network or credentials from a scenario.
+- The e2e baseline sets `TUICR_PREPARE_ON_OPEN=0`. Scenarios exercising preparation or Ask use synthetic reviews and fake provider executables; never use a real AI account.
 - Adding a scenario: update `e2e/COVERAGE.md`.
 
 ## Key types and invariants
 
 **App** (`src/app/mod.rs`, `src/app/`): central state (`vcs`, `vcs_info`, `session`, `diff_files`, `input_mode`, scroll/cursor). PR mode adds `pr_info`. Comment navigation uses `CommentNavigatorState`/`CommentNavigatorItem` derived from `line_annotations`, so local comments and visible remote threads jump to the annotations the diff renders (`move_cursor_to_annotation`).
+
+**Fork review workflow:** `src/review_guide/` defines the version 2 JSON, source
+range resolution, mechanical classification, and `GuideStore`. A stop is
+anchored by display path, side, and inclusive source line range inside one
+hunk. Its ID is stable across preparations of unchanged code. The store
+keys by checkout and scope or by host-aware PR identity; the guide's digest
+identifies the exact diff. Preparation state, guide output, and verdict
+progress are separate from one another and from the review session.
+
+`src/prepare/` loads the exact review target, writes or audits guides, and
+tracks the Unix background worker (five minutes without progress is failure).
+`src/review_agent/` resolves provider and model settings, materializes a
+read-only source snapshot, and runs the provider. Claude can use scoped
+read/search tools; Codex uses bounded prompt evidence only. No provider may
+run the reviewed code. Opening the PR or explicitly starting preparation
+allows that review's preparation; appearing in a list does not.
+
+`src/app/review_map.rs` walks stories. At a stop, `.` records Checks out unless
+it is risky, untested, or doubtful: these stops require an explicit `K`,
+`x`, or `p`. `x` records Wrong only after its range comment saves; `p` records
+Parked, not verified. Checks out marks a hunk reviewed only if the stop covers
+all of its changed lines. Keep verdicts after reload only when their recorded
+block still matches. Installing a guide or observing background progress
+must never move the cursor or steal focus; navigation is a reviewer action.
+
+For local reviews, `review_guide::baseline` keeps a private, size-capped
+text baseline beside the guide. `:changes` uses it, not HEAD or a provider.
+Keep the comment's line-map key authoritative: `original_text` is relocation
+evidence, not a location. Only move draft anchors that match unambiguously
+on their own side; otherwise mark them stale and keep the stored location.
+
+Private Ask questions, answers, and suggested feedback are not `Comment`s.
+Keep them out of saved review comments, `review comments`, Markdown exports,
+and forge payloads. Only an explicitly saved review comment crosses that
+boundary. Coverage notes are derived from verdicts and marks, not private
+conversation text.
 
 **VcsBackend** (`src/vcs/traits.rs`): `GitBackend` (libgit2 by default; Git CLI for sparse checkouts, which also emits a startup warning, or `backend = "cli"`), `HgBackend`, `JjBackend`, all always compiled. `detect_vcs()` tries jj, then git, then hg. `supports_sparse_checkout()` is a capability hook. `remote_url(name)` must be implemented by every adapter and wired into the Git-only discovery call in `main.rs`; forge parsing stays in `forge::resolve_remote_repository`, never in the VCS adapter.
 

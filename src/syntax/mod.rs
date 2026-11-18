@@ -272,6 +272,32 @@ impl SyntaxHighlighter {
         Some(self.highlight_lines_with(syntax, lines))
     }
 
+    /// Highlight an excerpt from a known path, without guessing from its first line.
+    pub(crate) fn highlight_source_excerpt(
+        &self,
+        path: &Path,
+        lines: impl IntoIterator<Item: AsRef<str>>,
+    ) -> Option<HighlightedLines> {
+        Some(self.highlight_lines_with(self.get_syntax(path)?, lines))
+    }
+
+    /// Highlight the contents of one Markdown fence, retaining grammar state across lines.
+    pub(crate) fn highlight_fenced_code(
+        &self,
+        info: &str,
+        lines: impl IntoIterator<Item: AsRef<str>>,
+    ) -> Option<HighlightedLines> {
+        Some(self.highlight_lines_with(self.fenced_syntax(info)?, lines))
+    }
+
+    fn fenced_syntax(&self, info: &str) -> Option<&syntect::parsing::SyntaxReference> {
+        let token = info.split_whitespace().next()?;
+        self.syntax_set.find_syntax_by_token(token).or_else(|| {
+            Self::fallback_extension(token)
+                .and_then(|extension| self.syntax_set.find_syntax_by_extension(extension))
+        })
+    }
+
     /// Highlight a review comment body (`\n`-separated) as Markdown, returning
     /// one entry per line. Colors come from the active syntect theme, matching
     /// code highlighting.
@@ -288,16 +314,20 @@ impl SyntaxHighlighter {
     fn highlight_lines_with(
         &self,
         syntax: &syntect::parsing::SyntaxReference,
-        lines: &[String],
+        lines: impl IntoIterator<Item: AsRef<str>>,
     ) -> HighlightedLines {
         use syntect::easy::HighlightLines;
 
         let mut highlighter = HighlightLines::new(syntax, &self.theme);
+        let mut input = String::new();
 
         Self::collect_line_highlights(lines, |line| {
             // Highlight failures are scoped to the single line; other lines still keep highlighting.
+            input.clear();
+            input.push_str(line);
+            input.push('\n');
             highlighter
-                .highlight_line(&format!("{}\n", line), &self.syntax_set)
+                .highlight_line(&input, &self.syntax_set)
                 .ok()
                 .map(|ranges| {
                     let mut spans: Vec<(Style, String)> = ranges
@@ -322,15 +352,17 @@ impl SyntaxHighlighter {
         })
     }
 
-    fn collect_line_highlights<F>(lines: &[String], mut highlight_line: F) -> HighlightedLines
+    fn collect_line_highlights<F>(
+        lines: impl IntoIterator<Item: AsRef<str>>,
+        mut highlight_line: F,
+    ) -> HighlightedLines
     where
         F: FnMut(&str) -> Option<HighlightedSpans>,
     {
-        let mut result = Vec::with_capacity(lines.len());
-        for line in lines {
-            result.push(highlight_line(line));
-        }
-        result
+        lines
+            .into_iter()
+            .map(|line| highlight_line(line.as_ref()))
+            .collect()
     }
 
     fn highlighted_line_at(

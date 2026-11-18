@@ -21,6 +21,9 @@ First decide which workflow the user is asking for:
      periodically and look for new comment IDs.
    - Do not add your own review comments, do not preemptively review your own
      patch, and do not impersonate the user's comments.
+   - When asked to guide the review, [prepare an audited handoff](#prepare-a-guided-handoff)
+     before opening the review pane. Do not seek out the reviewer's private Ask
+     history; only saved review comments are feedback to you.
 
 2. **Agent review of an AI-generated patch**
    - The user wants you to understand, critique, or summarize a patch.
@@ -70,6 +73,46 @@ If the user's intent is ambiguous, ask which workflow they want.
 The CLI works even if the agent is not running inside tmux, Zellij, or Herdr,
 so do not require a multiplexer just to connect to an existing active session.
 
+## Prepare a Guided Handoff
+
+Use the exact target the reviewer will open, including any path filter or PR
+remote. Get the digest and source line ranges from the fork's outline command,
+not from an approximation of the patch:
+
+```bash
+tuicr guide outline -w
+# A PR example: tuicr guide outline pr 125
+```
+
+Write a version 2 JSON review guide outside the reviewed checkout. Group stops
+into stories ordered by importance. Start each story at a recognizable user
+action, command, or production entry point and follow the code that makes the
+behavior work. If the entry point is outside the diff, explain how it reaches
+the changed block. Each stop should make one claim the reviewer can check and
+anchor it by path, side, and inclusive source line range in one hunk. Start
+the explanation one level above that block. Use tests as stops only when they
+explain the behavior more clearly or are themselves the change; cite relevant
+tests as evidence without making them stops. Identify risks and estimate the
+review time. See `docs/CLI.md` for the format.
+
+Validate the file, then start preparation with `--guide` so the reviewing
+agent audits the supplied guide rather than writing a replacement:
+
+```bash
+tuicr guide check -w /path/to/review-guide.json
+tuicr prepare -w --guide /path/to/review-guide.json --wait
+# For a PR, use: tuicr guide check pr 125 /path/to/review-guide.json
+# and: tuicr prepare pr 125 --guide /path/to/review-guide.json --wait
+```
+
+Preparation sends review material to the configured provider. Start it only
+as part of the requested handoff. `--wait` succeeds when the matching diff
+has a ready guide. If it joined a job that was not auditing your file, rerun
+the command after that job ends: joining does not replace its input. Once
+ready, open the same target **without** `--guide` to load the prepared copy
+from the store. Tell the reviewer to press `.` to start. Passing `--guide`
+directly to the TUI is the manual, unaudited path.
+
 ## Start A Session
 
 When the user needs an interactive tuicr pane and no active session exists:
@@ -77,15 +120,15 @@ When the user needs an interactive tuicr pane and no active session exists:
 | Environment | Action |
 |-------------|--------|
 | `$CMUX_WORKSPACE_ID` is set | Run `tuicr-wrapper-cmux.sh /path/to/repo -- <scope>` |
-| `$REX_SESSION` is set | Run `tuicr-wrapper-rex.sh /path/to/repo -- <scope>` |
+| `$REX_SESSION` and `$REX_BLOCK` are set | Run `tuicr-wrapper-rex.sh /path/to/repo -- <scope>` |
 | `$TMUX` is set | Run `tuicr-wrapper.sh /path/to/repo -- <scope>` |
 | `$ZELLIJ` is set | Run `tuicr-wrapper-zellij.sh /path/to/repo -- <scope>` |
 | `$HERDR_ENV` is `1` | Run `tuicr-wrapper-herdr.sh /path/to/repo -- <scope>` |
 | None is set | Tell the user you are waiting for them to start `tuicr` in the repo, then attach with `tuicr review list` after they say it is ready |
 
-`<scope>` is `-w` for uncommitted working-tree changes or `-r <revset>` for a
-commit range — always pass one explicitly so the user is never left to pick
-staged/unstaged/commit-range manually in the TUI.
+Pass the exact review target after `--`, including any path filter and PR
+remote. For example: `-w -p src`, `-r main..HEAD`, or `pr 125 --remote upstream`.
+Do not leave the user to pick a target manually unless they asked to.
 
 If more than one multiplexer marker is set, prefer the innermost multiplexer if
 that is clear; otherwise ask. cmux hosts a Ghostty terminal, so `$TERM_PROGRAM`
@@ -110,11 +153,11 @@ The Herdr wrapper requires `jq` to read pane IDs and completion results from
 Herdr's JSON responses. The Rex wrapper requires `jq` to read the new block ref
 from `rex split --json`.
 
-Every wrapper accepts pass-through tuicr arguments after `--`, which is how
-you scope the review instead of leaving the scope selector for the user to
-fill in — for example `-- -w` for uncommitted working-tree changes or
-`-- -r <revset>` for a commit range. Always pass one of these explicitly when
-launching a review pane.
+Every wrapper passes the tuicr arguments after `--`. Use the same target
+arguments you used to outline, check and prepare the guide.
+
+To load a supplied guide without auditing it, append `--guide "/path/to/review guide.json"` after
+the target. Quote any checkout or argument path that contains spaces or apostrophes.
 
 If your tool supports command timeouts, use a long timeout, such as 10 minutes,
 because the tmux, Zellij, and Herdr wrappers wait for the TUI to exit. The cmux
@@ -133,16 +176,19 @@ between `=== TUICR BLOCK ===` markers; capture it to close the block later with
 Once the TUI creates its active session, use
 `tuicr review list --repo /path/to/repo` to capture the slug. If your
 environment cannot run another command while a blocking wrapper is waiting,
-read the comments after the user exits tuicr.
+read the comments after the user exits tuicr. A plain `:q` does not export
+anything; read saved feedback with `tuicr review comments` instead of asking
+the user to paste clipboard output.
 
 ## Reconstruct The Diff
 
-To review a patch yourself, rebuild the diff the user sees. The slug's source
-segment says which:
+To write a guide, use `tuicr guide outline` with the exact review target flags.
+For manual investigation, use the slug's source segment to select a diff.
+These Git commands are only starting points, not interchangeable with the TUI:
 
 | Slug segment | Diff |
 |--------------|------|
-| `worktree/<head>`, `staged-and-unstaged/<head>` | `git diff HEAD` |
+| `worktree/<head>`, `staged-and-unstaged/<head>` | `tuicr guide outline -w`; `git diff HEAD` leaves out untracked files that tuicr includes |
 | `staged/<head>` | `git diff --cached` |
 | `unstaged/<head>` | `git diff` |
 | `commits/<base>..<head>` | `git diff <base>~1..<head>` |
@@ -177,6 +223,8 @@ The command emits JSON. Each comment includes fields like:
 - `author`
 - `lifecycle_state`
 - `content`
+- `stale`: `true` when the original code for a local draft no longer has an unambiguous location
+- `original_text`: the original commented source lines, as an array of strings, present for stale comments
 
 Treat these comments as the user's review feedback:
 
@@ -184,6 +232,7 @@ Treat these comments as the user's review feedback:
 - `suggestion`: consider implementing or explain why not
 - `note`: answer or acknowledge
 - `praise`: no action required
+- `none`: untyped feedback; treat it as a question or request to address, and ask if the intent is unclear
 
 If you are waiting during an active review, poll this command about every 30
 seconds and compare comment IDs with the previous result. Read immediately when
@@ -201,6 +250,15 @@ another active session should be selected, when `reviewed_count` is less than
 `file_count` (the user quit before reviewing everything) or you can't find a
 `tuicr-summary:` line at all. If the review may have continued while you were
 working, rerun `tuicr review comments` before claiming completion.
+
+### Hand Back Changes After Feedback
+
+After making changes, tell the reviewer to reload the same review with `:e`
+and name the affected files or comments so they can find your responses. In a
+local review, `:changes` walks **Changed since you started**, with or without
+a prepared guide. If `tuicr review comments` reports `stale: true`, use
+its `original_text` lines to understand what the reviewer meant, not the old
+line number as a pointer to current code.
 
 ## Add Agent Comments
 
