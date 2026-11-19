@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Review guide rebuild: Ask can read unchanged files at the exact reviewed revision.
+# Review guide rebuild: Ask runs in a private checkout of the exact reviewed revision, with full git history.
 from e2e.companion import fake_claude
 
 from e2e import Scenario, repos, scenario
@@ -15,13 +15,18 @@ def main(s: Scenario) -> None:
     repos.write(feature, "API version 2\n")
     repos.git(repo, "commit", "-qam", "change API")
     repos.write(callers, "call_api CHECKOUT_ONLY_MARKER\n")
+    reviewed = repos.git(repo, "rev-parse", "HEAD")
 
     fake_claude(
         s,
         f"""
 assert "CHECKOUT_ONLY_MARKER" not in prompt
 assert Path.cwd().resolve() != Path({str(repo)!r}).resolve()
-assert not Path(".git").exists()
+import subprocess
+git = lambda *args: subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout.strip()
+assert git("rev-parse", "HEAD") == {reviewed!r}
+assert git("log", "--format=%s").splitlines() == ["change API", "base"]
+assert git("status", "--porcelain") == ""
 assert Path("tests/callers.txt").read_text() == "call_api reviewed caller\\n"
 activity("Read")
 answer("Found unchanged caller at the reviewed revision")

@@ -28,7 +28,8 @@ elif "Reviewer's current question:\\na new question" in prompt:
 else:
     assert 'Hidden extra sentence' not in prompt, 'Reveal must not launch another provider'
     assert 'two or three sentences' in prompt and 'one level above' in prompt
-    assert '--model=haiku' in sys.argv
+    assert '--model=sonnet' in sys.argv
+    assert sys.argv[sys.argv.index('--effort') + 1] == 'medium'
     activity('Read')
     while not Path({str(started)!r}).exists():
         time.sleep(0.02)

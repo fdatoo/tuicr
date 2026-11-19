@@ -15,7 +15,7 @@ use super::evidence::Evidence;
 use super::prompts::{REPAIR, Rules};
 use crate::error::{Result, TuicrError};
 use crate::model::DiffFile;
-use crate::review_agent::{self, AgentEvent, AgentRequest, Cancel, Settings, SnapshotRequest};
+use crate::review_agent::{self, AgentEvent, AgentRequest, Cancel, Settings, SourceRequest};
 use crate::review_guide::{
     Audit, Author, Basis, Followup, GuideStore, PrepState, Provenance, ReviewGuide, Risk, RiskKind,
     Side, Stop, Story, SupportingGroup, TestRef, mechanical, outline, resolve,
@@ -42,7 +42,7 @@ type Runner<'a> = dyn Fn(
 #[derive(Serialize, Deserialize)]
 pub(super) struct Job<'a> {
     pub(super) files: Cow<'a, [DiffFile]>,
-    pub(super) snapshot: SnapshotRequest,
+    pub(super) source: SourceRequest,
     pub(super) diff: String,
     pub(super) title: String,
     pub(super) context: Value,
@@ -60,28 +60,21 @@ pub(super) fn prepare(
     let settings = Settings::load().map_err(TuicrError::InvalidInput)?;
     require_provider(settings.provider)?;
     let rules = Rules::load()?;
-    step(state, &mut persist, "Building the source snapshot")?;
-    let snapshot = job.snapshot.materialize().map_err(|error| {
-        TuicrError::InvalidInput(format!("Could not build the source snapshot: {error}"))
+    step(state, &mut persist, "Preparing the source checkout")?;
+    let workspace = job.source.workspace().map_err(|error| {
+        TuicrError::InvalidInput(format!("Could not prepare the source checkout: {error}"))
     })?;
-    if job.snapshot.is_local() {
-        // When preparation opens a local review first, retain the actual
-        // snapshot's file inodes rather than copying its source a second time.
+    if job.source.is_local() {
         let _ = crate::review_guide::baseline::Baseline::open_or_capture(
             store,
             &job.diff,
             &job.files,
-            &job.snapshot,
-            Some(snapshot.dir()),
+            &job.source,
         );
     }
     step(state, &mut persist, "Classifying hunks and risks")?;
     let mechanical = mechanical::classify(&job.files);
-    let evidence = Evidence::collect(
-        &job.files,
-        snapshot.dir(),
-        !review_agent::can_read_files(settings.provider),
-    );
+    let evidence = Evidence::collect(&job.files);
     let context = ReviewContext {
         files: &job.files,
         diff: &job.diff,
@@ -90,7 +83,7 @@ pub(super) fn prepare(
         context: &job.context,
         rules: &rules,
         evidence: &evidence.text,
-        source_limit: snapshot.limits(),
+        source_note: workspace.note(),
     };
     let supplied = job.supplied.as_deref().map(read_guide).transpose()?;
     let previous = if supplied.is_none() {
@@ -102,7 +95,7 @@ pub(super) fn prepare(
     };
     let mut model = Model {
         settings: &settings,
-        dir: snapshot.dir(),
+        dir: workspace.dir(),
         cancel,
         runner: &review_agent::run,
     };
@@ -121,7 +114,7 @@ pub(super) fn prepare(
         unaudited_count(&guide)
     };
     let limits = preparation_limits(
-        snapshot.limits(),
+        workspace.note(),
         &evidence.limits,
         rules.truncated,
         dropped,
@@ -176,13 +169,13 @@ fn require_provider(provider: review_agent::Provider) -> Result<()> {
 }
 
 fn preparation_limits(
-    snapshot: Option<&str>,
+    note: Option<&str>,
     evidence: &[&str],
     truncated: bool,
     dropped: usize,
     unaudited: usize,
 ) -> Option<String> {
-    let mut limits = snapshot
+    let mut limits = note
         .into_iter()
         .chain(evidence.iter().copied())
         .map(str::to_owned)
@@ -265,7 +258,7 @@ struct ReviewContext<'a> {
     context: &'a Value,
     rules: &'a Rules,
     evidence: &'a str,
-    source_limit: Option<&'a str>,
+    source_note: Option<&'a str>,
 }
 
 impl ReviewContext<'_> {
@@ -290,8 +283,8 @@ impl ReviewContext<'_> {
             data,
             self.outline
         );
-        if let Some(limit) = self.source_limit {
-            let _ = writeln!(base, "\nSource snapshot limit (data): {limit}");
+        if let Some(note) = self.source_note {
+            let _ = writeln!(base, "\nSource checkout note (data): {note}");
         }
         base.push_str(self.evidence);
         base

@@ -810,13 +810,11 @@ mod tests {
         store.save_state(&previous).unwrap();
         let job = Job {
             files: std::borrow::Cow::Borrowed(&[]),
-            snapshot: crate::review_agent::SnapshotRequest::local(
+            source: crate::review_agent::SourceRequest::local(
                 dir.path().into(),
                 crate::vcs::traits::VcsType::Git,
                 crate::review_agent::LocalTarget::Worktree,
-                None,
                 false,
-                Vec::new(),
             ),
             diff: "current diff".into(),
             title: "Test review".into(),

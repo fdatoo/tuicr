@@ -282,7 +282,7 @@ out to.
 | `TUICR_PROFILE` | Write a startup/render profile log. See below |
 | `TUICR_PROFILE_FILE` | Path for that log, overriding the default location |
 | `TUICR_COMPANION` | Choose the provider for Ask and preparation: `claude` (default) or `codex`. Overrides `companion` in the config and uses that CLI's authentication |
-| `TUICR_COMPANION_MODEL` | Override `companion_model` for Ask. Claude defaults to `haiku`; Codex uses its default model with low reasoning effort |
+| `TUICR_COMPANION_MODEL` | Override `companion_model` for Ask. Claude defaults to `sonnet`; Codex uses its default model. Ask runs at medium reasoning effort, more detail at high |
 | `TUICR_REVIEWER_MODEL` | Override `reviewer_model` for guide preparation. Claude defaults to `sonnet`; Codex uses its default model with medium reasoning effort |
 | `TUICR_PREPARE_ON_OPEN` | Override `prepare_on_open` for PRs: `0` or `false` disables, `1` or `true` enables |
 | `AZURE_DEVOPS_SERVER_URL` | Hostname of a self-hosted Azure DevOps Server / TFS so its remotes are recognized as Azure DevOps. Requires a PAT. See [AZURE.md](AZURE.md) |

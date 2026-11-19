@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::model::{Comment, LineRange, LineSide, ReviewSession, SessionDiffSource};
-use crate::review_agent::{LocalTarget, SnapshotRequest};
+use crate::review_agent::{LocalTarget, SourceRequest};
 use crate::vcs::{detect_vcs_in, traits::VcsType};
 
 use super::CommentTarget;
@@ -161,7 +161,7 @@ fn locate(lines: &[&str], start: u32, original: &[String]) -> Option<u32> {
         .then_some(nearest.1)
 }
 
-pub(super) fn saved_source(session: &ReviewSession, side: LineSide) -> Option<SnapshotRequest> {
+pub(super) fn saved_source(session: &ReviewSession, side: LineSide) -> Option<SourceRequest> {
     if matches!(session.diff_source, SessionDiffSource::PullRequest) {
         return None;
     }
@@ -197,14 +197,7 @@ pub(super) fn saved_source(session: &ReviewSession, side: LineSide) -> Option<Sn
         }
         (_, LineSide::Old) => LocalTarget::Revision(session.base_commit.clone()),
     };
-    Some(SnapshotRequest::local(
-        root.clone(),
-        vcs,
-        target,
-        None,
-        false,
-        Vec::new(),
-    ))
+    Some(SourceRequest::local(root.clone(), vcs, target, false))
 }
 
 pub(crate) fn reconcile_saved(session: &mut ReviewSession) {
@@ -217,8 +210,8 @@ pub(crate) fn reconcile_saved(session: &mut ReviewSession) {
     }
     let old = saved_source(session, LineSide::Old);
     let new = saved_source(session, LineSide::New);
-    let old = old.as_ref().map(SnapshotRequest::local_text);
-    let new = new.as_ref().map(SnapshotRequest::local_text);
+    let old = old.as_ref().map(SourceRequest::local_text);
+    let new = new.as_ref().map(SourceRequest::local_text);
     let updates = plan(
         session,
         |comment| comment.commit_id.is_none(),

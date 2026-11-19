@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::model::{Comment, DiffFile, FileStatus, LineSide, ReviewSession};
-use crate::review_agent::SnapshotRequest;
+use crate::review_agent::SourceRequest;
 
 use super::{Audit, GuideStore, Risk, RiskKind, Side, Stop, Story, create_private_dir};
 
@@ -82,8 +82,7 @@ impl Baseline {
         store: &GuideStore,
         digest: &str,
         files: &[DiffFile],
-        source: &SnapshotRequest,
-        snapshot_dir: Option<&Path>,
+        source: &SourceRequest,
     ) -> io::Result<Self> {
         if let Some(baseline) = Self::open(store)? {
             return Ok(baseline);
@@ -106,7 +105,7 @@ impl Baseline {
                 continue;
             };
             let slot = index.paths.len() as u32;
-            let Some((text, cached)) = capture_file(file, snapshot_dir, &read) else {
+            let Some(text) = capture_file(file, &read) else {
                 index.paths.insert(path.into(), None);
                 continue;
             };
@@ -115,13 +114,9 @@ impl Baseline {
                 continue;
             }
             let dest = stage.path().join(slot.to_string());
-            // The Runner's file is already owner-only and read-only. Retain a
-            // link to that inode, even if the snapshot cache later expires.
-            if !cached.is_some_and(|cached| fs::hard_link(cached, &dest).is_ok()) {
-                let mut data = tempfile::NamedTempFile::new_in(stage.path())?;
-                data.write_all(text.as_bytes())?;
-                data.persist(&dest).map_err(|error| error.error)?;
-            }
+            let mut data = tempfile::NamedTempFile::new_in(stage.path())?;
+            data.write_all(text.as_bytes())?;
+            data.persist(&dest).map_err(|error| error.error)?;
             remaining -= text.len() as u64;
             index.paths.insert(path.into(), Some(slot));
         }
@@ -160,8 +155,8 @@ impl Baseline {
         digest: &str,
         files: &[DiffFile],
         session: &ReviewSession,
-        old: &SnapshotRequest,
-        new: &SnapshotRequest,
+        old: &SourceRequest,
+        new: &SourceRequest,
         visible: impl Fn(&Comment) -> bool,
     ) -> io::Result<Option<Story>> {
         if self.index.digest == digest {
@@ -206,7 +201,7 @@ impl Baseline {
                     text
                 }
             };
-            let Some((after, _)) = capture_file(file, None, &new) else {
+            let Some(after) = capture_file(file, &new) else {
                 continue;
             };
             let new_len = after.lines().count() as u32;
@@ -277,19 +272,15 @@ impl Baseline {
     }
 }
 
-fn capture_file(
-    file: &DiffFile,
-    snapshot_dir: Option<&Path>,
-    read: &impl Fn(&Path) -> Option<String>,
-) -> Option<(String, Option<PathBuf>)> {
+fn capture_file(file: &DiffFile, read: &impl Fn(&Path) -> Option<String>) -> Option<String> {
     if file.is_binary || file.is_too_large {
         return None;
     }
     let Some(path) = &file.new_path else {
-        return Some((String::new(), None));
+        return Some(String::new());
     };
     let verified = |text: &str| {
-        // Reject racing worktree reads or a snapshot that didn't contain this
+        // Reject racing worktree reads or a source that didn't contain this
         // applied version of the file. Check added lines rather than context,
         // where an ignore-whitespace diff may deliberately show old text.
         let mut lines = text.lines();
@@ -308,23 +299,8 @@ fn capture_file(
                     .unwrap_or(false)
             })
     };
-    if let Some(dir) = snapshot_dir {
-        let cached = dir.join(path);
-        if let Ok(file) = fs::File::open(&cached) {
-            let mut text = String::new();
-            if file
-                .take(MAX_BASELINE_BYTES + 1)
-                .read_to_string(&mut text)
-                .is_ok()
-                && text.len() as u64 <= MAX_BASELINE_BYTES
-                && verified(&text)
-            {
-                return Some((text, Some(cached)));
-            }
-        }
-    }
     let text = read(path)?;
-    (verified(&text) || file.status == FileStatus::Deleted).then_some((text, None))
+    (verified(&text) || file.status == FileStatus::Deleted).then_some(text)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -474,14 +450,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir_all(repo.join(".git")).unwrap();
-        let source = SnapshotRequest::local(
-            repo.clone(),
-            VcsType::Git,
-            LocalTarget::Worktree,
-            None,
-            false,
-            Vec::new(),
-        );
+        let source = SourceRequest::local(repo.clone(), VcsType::Git, LocalTarget::Worktree, false);
         let store = GuideStore::in_dir(
             dir.path(),
             &super::super::ReviewKey::for_local(&repo, "worktree"),
@@ -505,7 +474,7 @@ mod tests {
             fs::write(repo.join(path), "context\nbefore\n").unwrap();
         }
         let baseline =
-            Baseline::open_or_capture(&store, "initial", &parse("before"), &source, None).unwrap();
+            Baseline::open_or_capture(&store, "initial", &parse("before"), &source).unwrap();
 
         let current = parse("response");
         let mut session = ReviewSession::new(
@@ -565,14 +534,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir_all(repo.join(".git")).unwrap();
-        let source = SnapshotRequest::local(
-            repo.clone(),
-            VcsType::Git,
-            LocalTarget::Worktree,
-            None,
-            false,
-            Vec::new(),
-        );
+        let source = SourceRequest::local(repo.clone(), VcsType::Git, LocalTarget::Worktree, false);
         let store = GuideStore::in_dir(
             dir.path(),
             &super::super::ReviewKey::for_local(&repo, "worktree"),
@@ -600,8 +562,7 @@ mod tests {
             &["gap.txt", "gone.txt"],
             "@@ -1 +1 @@\n-original\n+amended\n",
         );
-        let baseline =
-            Baseline::open_or_capture(&store, "initial", &initial, &source, None).unwrap();
+        let baseline = Baseline::open_or_capture(&store, "initial", &initial, &source).unwrap();
         fs::write(repo.join("gap.txt"), "original\nkeep\nchanged\n").unwrap();
         fs::write(repo.join("gone.txt"), "original\nkeep\nchanged\n").unwrap();
         let current = parse(&["gap.txt"], "@@ -3 +3 @@\n-base\n+changed\n");

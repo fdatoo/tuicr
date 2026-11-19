@@ -75,9 +75,11 @@ guide. This starts only when you open the PR with automatic preparation on or
 explicitly start preparation, never while merely browsing the PR list. Ask sends
 the question, relevant thread history and code context when you request an AI
 answer or feedback draft. These calls need an authenticated `claude` (default)
-or `codex` executable on `PATH`. Claude can read and search a read-only snapshot
-of the review revision when available; Codex has no file tools and prepares from
-the bounded diff and changed-file excerpts only. Do not use the provider on
+or `codex` executable on `PATH`. The provider runs in a real, read-only checkout
+of the reviewed revision with its full git history (your working tree for local
+reviews, a private checkout of the PR commit otherwise), so it can read files,
+use read-only git commands and use the MCP servers you have configured for it.
+It loads your own `claude` or `codex` settings. Do not use the provider on
 material you are not allowed to send. Background preparation requires Unix
 (including macOS and Linux). Set `prepare_on_open = false` to review PRs
 without automatic AI preparation.

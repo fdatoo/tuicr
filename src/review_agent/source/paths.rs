@@ -2,49 +2,6 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Component, Path};
 
-/// Shared by archive extraction and working-tree copying.
-pub(super) fn safe_relative(path: &Path) -> bool {
-    let Some(raw) = path.to_str() else {
-        return false;
-    };
-    !raw.is_empty()
-        && raw.len() <= 1024
-        && !raw.contains([':', '\\'])
-        && !raw.chars().any(char::is_control)
-        && path.components().all(|part| {
-            let Component::Normal(part) = part else {
-                return false;
-            };
-            let Some(part) = part.to_str() else {
-                return false;
-            };
-            !part.ends_with(['.', ' '])
-                && !part
-                    .get(..4)
-                    .is_some_and(|s| s.eq_ignore_ascii_case(".env"))
-                && ![
-                    ".git",
-                    ".hg",
-                    ".hg_archival.txt",
-                    ".jj",
-                    ".svn",
-                    ".ssh",
-                    ".aws",
-                    ".tuicr",
-                    ".claude",
-                    ".claude.json",
-                    ".codex",
-                    ".agents",
-                    ".mcp.json",
-                    "CLAUDE.md",
-                    "AGENTS.md",
-                ]
-                .iter()
-                .any(|name| part.eq_ignore_ascii_case(name))
-                && !windows_special_name(part)
-        })
-}
-
 fn windows_special_name(part: &str) -> bool {
     let stem = part.split('.').next().unwrap_or_default();
     ["CON", "PRN", "AUX", "NUL"]
@@ -57,16 +14,7 @@ fn windows_special_name(part: &str) -> bool {
                 .is_some_and(|s| s.eq_ignore_ascii_case("COM") || s.eq_ignore_ascii_case("LPT")))
 }
 
-/// Resolve each component with O_NOFOLLOW relative to an already-open parent.
-/// A concurrent symlink swap cannot redirect the read outside the worktree.
-pub(super) fn open_regular(root: &Path, rel: &Path) -> io::Result<File> {
-    if !safe_relative(rel) {
-        return Err(io::Error::other("unsafe review source path"));
-    }
-    open_local_regular(root, rel)
-}
-
-/// Local-only consumers do not share the provider's content exclusions.
+/// Local-only reads never follow VCS metadata directories or unsafe names.
 pub(super) fn local_relative(path: &Path) -> bool {
     !path.as_os_str().is_empty()
         && path.components().all(|component| {

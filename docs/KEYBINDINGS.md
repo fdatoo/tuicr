@@ -180,13 +180,17 @@ without an automatic retry. Only an empty or unusable answer (such as raw
 tool-protocol output) is retried once. Failed or cancelled answers aren't
 saved.
 
-Answers render Markdown and highlight language-tagged code. Claude can read
-and search a read-only snapshot of the review revision, including files outside
-the diff. For PRs, a matching clone can supply that revision; GitHub can also
-provide a pinned archive, whose contents may reflect export attributes. If the
-target revision or source is unavailable (including an unconfirmed old side),
-Ask uses the available diff context rather than an unrelated checkout.
-Codex has no file tools and receives only bounded context in the prompt.
+Answers render Markdown and highlight language-tagged code. The provider runs
+in a real checkout of the reviewed revision, with its full git history, and may
+only read: it can search and read files (including those outside the diff), run
+read-only git or Mercurial commands, and use the MCP servers from your
+own Claude or Codex settings. For the working tree, that checkout is your
+repository itself. For a past commit or a PR it is a private checkout under
+tuicr's cache, built from your clone's objects (a matching clone of the PR's
+repository supplies the commit, fetching it if needed) or, for GitHub PRs
+without one, from a private blobless clone made with `gh`. Unused checkouts are
+removed after a week. If the revision is unavailable (including an unconfirmed
+old side), Ask is told so and uses the diff, never an unrelated checkout.
 
 Ask history is stored under `companion/` in tuicr's platform data directory,
 separate from `reviews/`. To erase it locally, close tuicr and delete

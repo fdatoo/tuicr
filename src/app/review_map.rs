@@ -813,10 +813,10 @@ impl App {
         };
         let digest = self.review_digest();
         let commits = self.selected_commit_set();
-        let old = self.snapshot_request(LineSide::Old);
-        let new = self.snapshot_request(LineSide::New);
+        let old = self.source_request(LineSide::Old);
+        let new = self.source_request(LineSide::New);
         let story = GuideStore::open(&key).and_then(|store| {
-            Baseline::open_or_capture(&store, &digest, &self.diff_files, &new, None)?.story(
+            Baseline::open_or_capture(&store, &digest, &self.diff_files, &new)?.story(
                 &digest,
                 &self.diff_files,
                 &self.session,

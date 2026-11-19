@@ -1101,7 +1101,7 @@ impl App {
                 LineSide::New => file.new_path.as_deref(),
             };
             block = source_path
-                .and_then(self.snapshot_request(side).local_text())
+                .and_then(self.source_request(side).local_text())
                 .map_or_else(Vec::new, |text| anchors::capture(&text, range));
         }
         block
@@ -1128,8 +1128,8 @@ impl App {
         }) {
             return false;
         }
-        let old = self.snapshot_request(LineSide::Old);
-        let new = self.snapshot_request(LineSide::New);
+        let old = self.source_request(LineSide::Old);
+        let new = self.source_request(LineSide::New);
         let old = old.local_text();
         let new = new.local_text();
         let files = &self.diff_files;

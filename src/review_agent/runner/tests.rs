@@ -103,13 +103,13 @@ fn provider_errors_never_quote_private_output() {
 }
 
 #[test]
-fn review_provider_keeps_model_in_one_argument_and_disables_unsafe_tools() {
+fn review_provider_keeps_model_in_one_argument_and_stays_read_only() {
     for provider in [Provider::Claude, Provider::Codex] {
         let request = AgentRequest {
             provider,
             model: Some("--dangerously-bypass-approvals-and-sandbox two".into()),
             thorough: true,
-            dir: PathBuf::from("snapshot"),
+            dir: PathBuf::from("checkout"),
             prompt: "private prompt".into(),
         };
         let command = request.command();
@@ -122,18 +122,29 @@ fn review_provider_keeps_model_in_one_argument_and_disables_unsafe_tools() {
         assert_eq!(command.get_current_dir(), Some(request.dir.as_path()));
         match provider {
             Provider::Claude => {
-                assert!(args.windows(2).any(|a| a == ["--tools", "Read,Glob,Grep"]));
-                assert!(args.windows(2).any(|a| a == ["--effort", "high"]));
-                assert!(args.contains(&"--restricted"));
-            }
-            Provider::Codex => {
-                assert!(args.windows(2).any(|a| a == ["--disable", "shell_tool"]));
                 assert!(
                     args.windows(2)
-                        .any(|a| a == ["--disable", "code_mode_host"])
+                        .any(|a| a == ["--permission-mode", "dontAsk"])
                 );
-                assert!(args.contains(&"model_reasoning_effort=\"medium\""));
-                assert!(args.contains(&"mcp_servers={}"));
+                assert!(
+                    args.windows(2)
+                        .any(|a| a == ["--permission-prompts", "none"])
+                );
+                let allowed = args.iter().position(|a| *a == "--allowedTools").unwrap();
+                let allowed = args[allowed + 1..]
+                    .iter()
+                    .take_while(|a| !a.starts_with("--"));
+                for tool in allowed {
+                    assert!(
+                        !CLAUDE_WRITE_TOOLS.contains(tool) && *tool != "Bash",
+                        "{tool}"
+                    );
+                }
+                assert!(args.windows(2).any(|a| a == ["--disallowedTools", "Edit"]));
+            }
+            Provider::Codex => {
+                assert!(args.windows(2).any(|a| a == ["--sandbox", "read-only"]));
+                assert!(args.contains(&"approval_policy=never"));
             }
         }
     }

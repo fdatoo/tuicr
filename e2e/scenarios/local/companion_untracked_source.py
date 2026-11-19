@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Fork review guide: Ask's working-tree snapshot includes newly written, untracked source.
+# Fork review guide: for the working tree Ask runs in the repository itself, so untracked source is visible.
 from e2e.companion import fake_claude
 
 from e2e import Scenario, repos, scenario
@@ -11,8 +11,9 @@ def main(s: Scenario) -> None:
     repos.write(repo / "untracked-notes.txt", "From the new file: cobalt.\n")
     fake_claude(
         s,
-        """
+        f"""
 activity('Read')
+assert Path.cwd().resolve() == Path({str(repo)!r}).resolve()
 assert 'untracked-notes.txt' not in prompt
 text = Path('untracked-notes.txt').read_text().strip()
 assert text == 'From the new file: cobalt.'

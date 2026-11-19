@@ -139,7 +139,7 @@ fn review_job<'a>(
     let (title, context) = review_context(app);
     Job {
         files: Cow::Borrowed(files),
-        snapshot: app.snapshot_request(LineSide::New),
+        source: app.source_request(LineSide::New),
         diff,
         title,
         context,

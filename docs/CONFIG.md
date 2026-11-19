@@ -58,7 +58,7 @@ diff_watch_interval_ms = 0
 
 backend = "libgit2"
 companion = "claude"
-companion_model = "haiku"
+companion_model = "sonnet"
 reviewer_model = "sonnet"
 prepare_on_open = true
 notify_ready = true
@@ -131,7 +131,7 @@ session_header = true
 | `diff_watch_interval_ms`   | `0`          | Poll interval for re-reading the local diff so uncommitted changes show without `:e`. The same tick refreshes the commit pane, including the "Staged changes" and "Unstaged changes" rows. A commit-range review, from `-r` or picked in the commit selector, keeps its range in the pane. With `-w` it refreshes only those two rows. Without it the pane never gains them. `0` (default) disables it. Ignored for PR and `--all-files` reviews. |
 | `backend`                  | `libgit2`    | Git backend: `libgit2` or `cli`. Sparse-checkout repos auto-route to `cli`.                                                                                |
 | `companion` | `claude` | AI client for Ask and preparation: `claude` or `codex`. Requires that executable on `PATH` and an authenticated account. `TUICR_COMPANION` overrides this setting. |
-| `companion_model` | Provider default for Ask | Claude uses `haiku`; Codex uses its default model with low reasoning effort. `TUICR_COMPANION_MODEL` overrides this setting. |
+| `companion_model` | Provider default for Ask | Claude uses `sonnet`; Codex uses its default model. Ask runs at medium reasoning effort, and `Ctrl-o` (more detail) at high. `TUICR_COMPANION_MODEL` overrides this setting. |
 | `reviewer_model` | Provider default for preparation | Claude uses `sonnet`; Codex uses its default model with medium reasoning effort. `TUICR_REVIEWER_MODEL` overrides this setting. |
 | `prepare_on_open` | `true` | Start background preparation for an opened PR when needed. Does not prepare PRs merely shown in the list or prepare a local review automatically. `TUICR_PREPARE_ON_OPEN` overrides this setting. |
 | `notify_ready` | `true` | Emit a bell and terminal notification when the TUI observes a newly ready guide. Actual desktop notification support depends on the terminal. Does not affect preparation or in-app status. |

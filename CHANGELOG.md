@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 - Reduce wheel-scroll work in both layouts by rendering viewport rows and reusing diff annotations for motion.
 - Prepare and audit review guides in the background; follow stories and record block-level verdicts in the review map.
 - Ask Claude Code or Codex privately in a docked panel, with prepared follow-ups and editable feedback.
+- Run Ask and preparation in a real, read-only checkout of the reviewed revision, with full git history and your own provider settings and MCP servers, instead of a size-capped source copy.
 - Spot-check supporting changes, inspect coverage, and preview a coverage note before submitting a PR review.
 - Revisit local edits with `:changes`, and relocate draft comments or mark their anchors stale.
 

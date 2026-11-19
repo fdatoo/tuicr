@@ -51,7 +51,7 @@ fn preparation_fake_runner_repairs_once_and_records_dropped_stops() {
         context: &context_data,
         rules: &Rules::default(),
         evidence: "",
-        source_limit: None,
+        source_note: None,
     };
     let mut previous = draft();
     previous.diff = "prior".into();
@@ -231,7 +231,7 @@ fn preparation_audits_mechanical_fallback_and_replaces_false_prose() {
         context: &Value::Null,
         rules: &Rules::default(),
         evidence: "",
-        source_limit: None,
+        source_note: None,
     };
     let mut audit_calls = 0;
     let (guide, dropped) = context.write_audit_and_validate(Some(guide), None, &mut |stage, prompt| {
@@ -309,7 +309,7 @@ fn preparation_caps_writer_orientation_and_followups_at_sentence_boundaries() {
         context: &Value::Null,
         rules: &Rules::default(),
         evidence: "",
-        source_limit: None,
+        source_note: None,
     };
     let mut guide = draft();
     let short = concat!(
@@ -389,7 +389,7 @@ fn preparation_audits_missed_stops_and_limits_retries_for_omissions() {
         context: &json!({}),
         rules: &Rules::default(),
         evidence: "",
-        source_limit: None,
+        source_note: None,
     };
     let mut guide = draft();
     guide.stories[0].stops.truncate(1);
@@ -457,7 +457,7 @@ fn preparation_caps_model_story_stops_without_losing_risks_or_hunks() {
         context: &json!({}),
         rules: &Rules::default(),
         evidence: "",
-        source_limit: None,
+        source_note: None,
     };
     let mut guide = draft();
     for (title, range) in [

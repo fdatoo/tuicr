@@ -245,16 +245,16 @@ fn review_snapshot_tracks_base_certainty_across_same_head_reloads() {
     };
 
     reload(&mut app, true);
-    let old = app.snapshot_request(LineSide::Old);
+    let old = app.source_request(LineSide::Old);
     assert_eq!(old.pinned_pr_sha(), Some(details.base_sha.as_str()));
-    let new = app.snapshot_request(LineSide::New);
+    let new = app.source_request(LineSide::New);
     assert_eq!(new.pinned_pr_sha(), Some(key.head_sha.as_str()));
 
     reload(&mut app, false);
-    let old_after_reload = app.snapshot_request(LineSide::Old);
+    let old_after_reload = app.source_request(LineSide::Old);
     assert_ne!(old_after_reload, old);
     assert_eq!(old_after_reload.pinned_pr_sha(), None);
-    assert_eq!(app.snapshot_request(LineSide::New), new);
+    assert_eq!(app.source_request(LineSide::New), new);
 }
 
 #[test]
@@ -277,12 +277,12 @@ fn review_snapshot_uses_applied_subset_base_certainty_not_cumulative_certainty()
         anchor: None,
     };
     app.finish_pr_range_reload(&request, Vec::new()).unwrap();
-    let before = app.snapshot_request(LineSide::Old);
+    let before = app.source_request(LineSide::Old);
     assert_eq!(before.pinned_pr_sha(), None);
 
     request.start_sha_confirmed = true;
     app.finish_pr_range_reload(&request, Vec::new()).unwrap();
-    let after = app.snapshot_request(LineSide::Old);
+    let after = app.source_request(LineSide::Old);
     assert_eq!(after.pinned_pr_sha(), Some(request.start_sha.as_str()));
     assert_ne!(before, after);
 }

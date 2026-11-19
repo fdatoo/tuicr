@@ -32,11 +32,23 @@ progress are separate from one another and from the review session.
 
 `src/prepare/` loads the exact review target, writes or audits guides, and
 tracks the Unix background worker (five minutes without progress is failure).
-`src/review_agent/` resolves provider and model settings, materializes a
-read-only source snapshot, and runs the provider. Claude can use scoped
-read/search tools; Codex uses bounded prompt evidence only. No provider may
-run the reviewed code. Opening the PR or explicitly starting preparation
-allows that review's preparation; appearing in a list does not.
+`src/review_agent/` resolves provider and model settings, resolves the reviewed
+side to a real checkout (`SourceRequest::workspace`, `source/`), and runs the
+provider in it with the user's own settings and MCP servers. Working-tree
+sides run in the repository itself; a past commit or PR head gets a private
+`git clone --shared` checkout of that exact commit (full history, never the
+live tree) under the cache's `review-checkouts/`, or a `gh`-made blobless
+mirror worktree for GitHub PRs with no matching local clone. Unconfirmed
+sides get an empty directory and a "use the diff" note. Providers are
+read-only, enforced in `runner.rs`: Claude runs `dontAsk` with an allow-list of
+read tools and read-only git/hg commands (writes disallowed) plus a
+`PreToolUse` hook approving every `mcp__.*` tool; Codex runs in its
+`read-only` sandbox. MCP tools are not filtered by side effect; only the
+system prompt forbids external changes. None may run the reviewed code.
+Checkouts carry a lease file (completion
+marker, shared lock while in use) and are pruned after a week. Opening the PR
+or explicitly starting preparation allows that review's preparation;
+appearing in a list does not.
 
 `src/app/review_map.rs` walks stories. At a stop, `.` records Checks out unless
 it is risky, untested, or doubtful: these stops require an explicit `K`,

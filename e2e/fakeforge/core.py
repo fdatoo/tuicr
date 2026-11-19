@@ -26,7 +26,11 @@ FORGE_DIRS = {"gh": "github", "glab": "gitlab", "tea": "gitea", "bkt": "bitbucke
 
 class Fake:
     def __init__(self, tool: str, argv: list[str]) -> None:
-        self.tool, self.argv = tool, argv
+        # $E2E_SHA_MAP="<fixture sha>=<real sha>,...": a scenario that needs a commit tuicr can really check out
+        # has the fake print the real id where a fixture holds the placeholder, and read it back as the placeholder.
+        self.shas = dict(pair.split("=", 1) for pair in os.environ.get("E2E_SHA_MAP", "").split(",") if "=" in pair)
+        self.tool = tool
+        self.argv = [self._sha_in(a) for a in argv]
         self.data_dir = os.path.join(os.environ["E2E_DATA"], FORGE_DIRS[tool])
         self.log = os.environ.get("E2E_FORGE_LOG")
         self.stdin: str | None = None
@@ -47,8 +51,16 @@ class Fake:
                 f.write(json.dumps(entry) + "\n")
 
     # ---- exits ----------------------------------------------------------
+    def _sha_in(self, text: str) -> str:
+        for fixture, real in self.shas.items():
+            text = text.replace(real, fixture)
+        return text
+
     def out(self, body: Any) -> NoReturn:
-        sys.stdout.write(body if isinstance(body, str) else json.dumps(body))
+        text = body if isinstance(body, str) else json.dumps(body)
+        for fixture, real in self.shas.items():
+            text = text.replace(fixture, real)
+        sys.stdout.write(text)
         sys.exit(0)
 
     def fail(self, message: str, rc: int = 1) -> NoReturn:

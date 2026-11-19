@@ -162,6 +162,12 @@ exit conventions (97 = unexpected call). An adapter (`gh.py`, ...) only maps tha
 fixture files under `data/<forge>/`. To teach a fake a new route add the fixture file and one `if` in the adapter.
 Which fake answers is decided by the repository's origin URL (`s.forge_open(url)`).
 
+A scenario that needs tuicr to really check out a PR commit (Ask runs in a checkout of it) cannot use the fixtures'
+placeholder ids such as `bbbb…`. Build a real repository, then `E2E_SHA_MAP="<placeholder>=<real sha>"` makes the fake
+print the real id wherever a fixture holds the placeholder and read it back. `E2E_GITHUB_CLONE_SOURCE=<repo>` is what
+the fake `gh repo clone` copies. Every tuicr under test also runs with a global git config (`data/gitconfig`) that
+forbids the http(s), ssh and git protocols, so a fixture origin that looks real is never contacted.
+
 ## Debugging a failure
 
 1. Read `$E2E_OUT/<area>/<behaviour>.log`: it names the failed step (`at <scenario>:<line>`) and prints the evidence, e.g. the screen it saw.

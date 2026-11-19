@@ -146,6 +146,8 @@ def child_env(d: Path, path: str, extra: dict[str, str] | None = None) -> dict[s
         LC_ALL=LOCALE,
         E2E_FORGE_LOG=f"{d}/forge.log",
         E2E_DATA=f"{E2E_DIR}/data",
+        GIT_CONFIG_GLOBAL=f"{E2E_DIR}/data/gitconfig",
+        GIT_CONFIG_NOSYSTEM="1",
         TUICR_PREPARE_ON_OPEN="0",
     )
     env.update(extra or {})

@@ -9,7 +9,7 @@ from e2e import Scenario, forge, scenario, wait_cmd
 
 @scenario
 def main(s: Scenario) -> None:
-    # Gerrit's fixture has pinned source objects locally, so no archive fetch is needed.
+    # Gerrit's fixture has pinned source objects locally, so no clone or fetch is needed.
     guide = {
         "version": 2,
         "diff": "",

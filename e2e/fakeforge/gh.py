@@ -2,7 +2,8 @@
 
 Fixtures: data/github/. Knobs (env): E2E_VARIANT / E2E_VARIANT_FILE (overlay dir),
 E2E_LIST_ROWS / E2E_LIST_FAIL_ABOVE (PR list size, failing load-more),
-E2E_HEAD_MODE=once|every (PR head moves while the PR opens), E2E_HOLD_DIR (core).
+E2E_HEAD_MODE=once|every (PR head moves while the PR opens), E2E_HOLD_DIR (core),
+E2E_GITHUB_CLONE_SOURCE (a local repository that `gh repo clone` copies; unset: the clone fails like an offline gh).
 """
 
 from __future__ import annotations
@@ -10,9 +11,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.parse
-from pathlib import Path
 
 from .core import Fake
 
@@ -49,6 +50,8 @@ def handle(f: Fake) -> None:
         return pr_list(f)
     if argv[:2] == ["pr", "view"]:
         return pr_view(f)
+    if argv[:2] == ["repo", "clone"]:
+        return repo_clone(f)
     if argv[:2] == ["pr", "diff"]:
         f.serve("pr_diff.patch")
     if argv[:1] != ["api"]:
@@ -66,6 +69,21 @@ def handle(f: Fake) -> None:
     if pos == ["graphql"]:
         return graphql(f, fields)
     return rest(f, pos[0] if pos else "")
+
+
+def repo_clone(f: Fake) -> None:
+    """`gh repo clone <owner/name> <dir> -- <git flags>`: copy $E2E_GITHUB_CLONE_SOURCE into <dir> (no network)."""
+    source = os.environ.get("E2E_GITHUB_CLONE_SOURCE")
+    args = f.argv[2:]
+    positional = args[: args.index("--")] if "--" in args else args
+    if len(positional) != 2:
+        f.unexpected("repo clone without a destination")
+    if not source:
+        f.fail("could not resolve host: github.com")
+    clone = subprocess.run(["git", "clone", "--quiet", "--no-checkout", source, positional[1]], capture_output=True)
+    if clone.returncode:
+        f.fail(clone.stderr.decode(errors="replace"), clone.returncode)
+    sys.exit(0)
 
 
 def pr_list(f: Fake) -> None:
@@ -165,15 +183,6 @@ def rest(f: Fake, endpoint: str) -> None:
         f.unexpected(f"unexpected {method} to {path}")
     base, _, query = path.partition("?")
     first_page = f.page(query) == "1"
-    if re.fullmatch(r"tarball/[a-f0-9]{40}", base):
-        archive = os.environ.get("E2E_GITHUB_ASK_ARCHIVE")
-        sha = os.environ.get("E2E_GITHUB_ASK_ARCHIVE_SHA")
-        if archive and base == f"tarball/{sha}":
-            sys.stdout.buffer.write(Path(archive).read_bytes())
-            raise SystemExit(0)
-        if archive:
-            f.unexpected("archive requested for the wrong reviewed revision")
-        f.fail("Archive not available (HTTP 404)")
     if re.fullmatch(r"pulls/\d+/files", base):
         f.serve("files.json") if first_page else f.out("[]\n")
     if re.fullmatch(r"pulls/\d+/commits", base):

@@ -1,13 +1,13 @@
 use super::{App, DiffSource, PullRequestDiffSource};
-use crate::model::{LineSide, SessionDiffSource};
-use crate::review_agent::{LocalTarget, SnapshotRequest, is_object_id};
+use crate::model::LineSide;
+use crate::review_agent::{LocalTarget, SourceRequest, is_object_id};
 use crate::vcs::{RevisionDiffTarget, traits::VcsType};
 
 impl App {
     /// Capture the applied review side without reading files or spawning commands.
-    pub fn snapshot_request(&self, side: LineSide) -> SnapshotRequest {
+    pub fn source_request(&self, side: LineSide) -> SourceRequest {
         if let DiffSource::PullRequest(pr) = &self.diff_source {
-            return self.pr_snapshot_request(pr, side);
+            return self.pr_source_request(pr, side);
         }
 
         let source = self
@@ -52,33 +52,16 @@ impl App {
             }
             _ => LocalTarget::Unavailable,
         };
-        let single_file = (self.session.diff_source == SessionDiffSource::File)
-            .then(|| {
-                self.diff_files
-                    .first()
-                    .map(|file| file.display_path().clone())
-            })
-            .flatten();
         let alternate_index = std::env::var_os("GIT_INDEX_FILE").is_some();
-        let anchors = if alternate_index && target == LocalTarget::Worktree {
-            self.diff_files
-                .iter()
-                .filter_map(|file| file.new_path.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        SnapshotRequest::local(
+        SourceRequest::local(
             self.vcs_info.root_path.clone(),
             vcs,
             target,
-            single_file,
             alternate_index,
-            anchors,
         )
     }
 
-    fn pr_snapshot_request(&self, pr: &PullRequestDiffSource, side: LineSide) -> SnapshotRequest {
+    fn pr_source_request(&self, pr: &PullRequestDiffSource, side: LineSide) -> SourceRequest {
         let (base, head, base_confirmed) = match &self.applied_pr_range {
             Some(range) => (&range.start_sha, &range.end_sha, range.start_sha_confirmed),
             None => (
@@ -91,7 +74,7 @@ impl App {
             LineSide::Old => base_confirmed.then_some(base),
             LineSide::New => Some(head),
         };
-        SnapshotRequest::pull_request(
+        SourceRequest::pull_request(
             self.local_repo_root.clone(),
             pr.key.repository.clone(),
             sha.cloned(),

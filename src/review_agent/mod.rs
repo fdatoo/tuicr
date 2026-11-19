@@ -1,12 +1,12 @@
-//! Source snapshots and the read-only provider runner for preparation and Ask.
+//! Real repository checkouts and the read-only provider runner for preparation and Ask.
 
 mod runner;
-mod snapshot;
+mod source;
 
 pub(crate) use runner::run_with_stall;
 pub use runner::{AgentEvent, AgentRequest, Cancel, CompanionRuntime, run};
-pub(crate) use snapshot::{LocalTarget, is_object_id};
-pub use snapshot::{Snapshot, SnapshotRequest};
+pub(crate) use source::{LocalTarget, is_object_id};
+pub use source::{SourceRequest, Workspace};
 
 use std::ffi::{OsStr, OsString};
 
@@ -17,11 +17,6 @@ pub enum Provider {
     #[default]
     Claude,
     Codex,
-}
-
-/// Only Claude offers native, scoped file tools without enabling an executor.
-pub fn can_read_files(provider: Provider) -> bool {
-    provider == Provider::Claude
 }
 
 impl Provider {
@@ -90,7 +85,8 @@ impl Settings {
         };
         Ok(Self {
             provider,
-            ask_model: ask_model.or_else(|| (provider == Provider::Claude).then(|| "haiku".into())),
+            ask_model: ask_model
+                .or_else(|| (provider == Provider::Claude).then(|| "sonnet".into())),
             reviewer_model: reviewer_model
                 .or_else(|| (provider == Provider::Claude).then(|| "sonnet".into())),
             prepare_on_open,
@@ -127,7 +123,7 @@ mod tests {
     fn review_agent_settings_defaults_and_overrides() {
         let default = Settings::resolve(AppConfig::default(), |_| None).unwrap();
         assert_eq!(default.provider, Provider::Claude);
-        assert_eq!(default.ask_model.as_deref(), Some("haiku"));
+        assert_eq!(default.ask_model.as_deref(), Some("sonnet"));
         assert_eq!(default.reviewer_model.as_deref(), Some("sonnet"));
         assert!(default.prepare_on_open);
 

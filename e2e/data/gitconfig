@@ -1,0 +1,10 @@
+# Global git config of every tuicr under test (GIT_CONFIG_GLOBAL): a scenario never reaches a real remote, even
+# when a fixture repository's origin is a real-looking URL. Local paths (protocol "file") still work.
+[protocol "http"]
+	allow = never
+[protocol "https"]
+	allow = never
+[protocol "ssh"]
+	allow = never
+[protocol "git"]
+	allow = never

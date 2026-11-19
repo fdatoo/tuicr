@@ -25,7 +25,7 @@ def main(s: Scenario) -> None:
     wait_file(calls)
     tui.keys("Enter").wait_for("PR Description").wait_for("Preparing review ·")
     tui.cmd("prs").wait_for(r"#1 .*preparing ·")
-    list_fetches = tui.forge_count(r"pr.*list")
+    list_fetches = tui.forge_count(r"\"pr\", \"list\"")
     tui.keys("P").wait_for(r"#1 .*cancelled")
     tui.keys("p").wait_for(r"#1 .*preparing ·")
     wait_cmd(10, lambda: len(calls.read_text().splitlines()) >= 2)
@@ -33,7 +33,7 @@ def main(s: Scenario) -> None:
     release.touch()
     tui.wait_for(r"guide +#1 .*ready · \d+ stops · about 12 min", 20)
     wait_cmd(5, lambda: raw.exists() and b"\x07\x1bPtmux;" in raw.read_bytes())
-    assert tui.forge_count(r"pr.*list") == list_fetches, "updating job status must not refetch the PR list"
+    assert tui.forge_count(r"\"pr\", \"list\"") == list_fetches, "updating job status must not refetch the PR list"
     tui.keys("BTab").wait_for(r"#1 .*ready · \d+ stops · about 12 min")
 
     tui.keys("Enter").wait_for("PR Description").wait_for(r"Review ready: \d+ stops, about 12 min")
